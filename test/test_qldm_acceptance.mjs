@@ -480,4 +480,59 @@ assert.equal(sesObj.stimulus_definition.nominal_full_scale_1khz_spl_db, 116.9);
 assert.equal(sesObj.level_limits.too_loud_events.length, 3);
 console.log(`[PASS Session Flows] Verified mid-session JSON reload recovery, Too Loud ceiling step-down, and LM_PSE / LM_TBT / LM_SES exports.`);
 
+/* -------------------------------------------------------------------------
+ * 9. Legacy v1.0.0 Calibration & Session Record Preservation (Follow-up 2)
+ *    A record without `refDbfsRms60` (or session with appVersion "1.0.0") must
+ *    load at -70.0 dBFS (+30 dB re qCLS) and give identical digital RMS to v1.0.0.
+ * ------------------------------------------------------------------------- */
+const v1CalRaw = {
+  id: "custom_coupler",
+  name: "Lab ER-3A (Measured under v1.0.0)",
+  couplerVerified: true,
+  date: "2026-11-20",
+  offsetsDb: { ...QLDM.TRANSDUCER_PRESETS.flat_ref.offsetsDb }
+  /* Note: intentionally no refDbfsRms60 field, matching qLDM_calibration_v1 */
+};
+
+const loadedV1Cal = QLDM.normalizeCalibrationRecord(v1CalRaw);
+assert.equal(loadedV1Cal.refDbfsRms60, -70.0, "Legacy v1 calibration without refDbfsRms60 must load at -70.0 dBFS");
+const v1FsInfo = QLDM.computeFullScale1kSpl(loadedV1Cal);
+assert.equal(v1FsInfo.refDbfsRms60, -70.0);
+assert.equal(v1FsInfo.gainAboveQclsDb, 30.0);
+assert.equal(v1FsInfo.fullScale1kSpl, 126.9);
+
+/* Verify stimulus at nominal 80 dB SPL has exact v1.0.0 digital RMS (10^(-70/20) * 10^((80-60)/20) = 10^(-50/20)) */
+const v1ExpectedRms80 = Math.pow(10.0, -70.0 / 20.0) * Math.pow(10.0, (80.0 - 60.0) / 20.0);
+for (const calCandidate of [v1CalRaw, loadedV1Cal]) {
+  const wV1 = QLDM.generateSoundWaveform({
+    centerHz: 1000,
+    sound: QLDM.SOUND_1OCT,
+    levelSpl: 80.0,
+    sampleRate: 48000,
+    durationMs: 500,
+    rampMs: 20,
+    calTable: calCandidate,
+    ceilingSpl: 100.0
+  });
+  assert.equal(wV1.ok, true);
+  const v1RmsDiffDb = Math.abs(20.0 * Math.log10(wV1.unrampedDigitalRms / v1ExpectedRms80));
+  assert.ok(v1RmsDiffDb < 1e-5, `v1 record RMS differed from v1.0.0 nominal by ${v1RmsDiffDb} dB`);
+}
+
+/* Verify interrupted/stored v1.0.0 session normalizes to -70.0 dBFS on resume/load */
+const v1SessionRaw = makeMockSession(123456).sess;
+v1SessionRaw.appVersion = "1.0.0";
+delete v1SessionRaw.calibration.refDbfsRms60;
+const resumedV1Sess = QLDM.normalizeSessionRecord(JSON.parse(JSON.stringify(v1SessionRaw)));
+assert.equal(resumedV1Sess.calibration.refDbfsRms60, -70.0);
+assert.equal(resumedV1Sess.calibration.gainAboveQclsDb, 30.0);
+assert.equal(resumedV1Sess.calibration.fullScale1kSpl, 126.9);
+const v1SesExport = JSON.parse(QLDM.formatSesJson(resumedV1Sess, "2026-11-20T16:50:00Z"));
+assert.equal(v1SesExport.stimulus_definition.reference_dbfs_rms_at_60db_spl, -70.0);
+assert.equal(v1SesExport.stimulus_definition.analog_gain_above_qcls_db, 30.0);
+
+/* Confirm default for new calibrations remains -60.0 dBFS */
+assert.equal(QLDM.TRANSDUCER_PRESETS.er3a_nominal.refDbfsRms60, -60.0);
+console.log(`[PASS Legacy v1.0.0 Compatibility] v1 records & sessions preserve -70.0 dBFS (+30 dB re qCLS, exact v1.0.0 digital RMS); new calibrations default to -60.0 dBFS.`);
+
 console.log("\nALL qLDM ACCEPTANCE TESTS PASSED.");

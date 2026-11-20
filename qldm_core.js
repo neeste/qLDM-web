@@ -12,7 +12,7 @@
 (function (global) {
   "use strict";
 
-  const APP_VERSION = "1.1.0";
+  const APP_VERSION = "1.1.1";
   const DEFAULT_FS = 48000;
 
   /*
@@ -31,6 +31,7 @@
    */
   const REF_SPL_DB = 60.0;
   const DEFAULT_REF_DBFS_60DB = -60.0;
+  const LEGACY_V1_REF_DBFS_60DB = -70.0;
   const MIN_REF_DBFS_60DB = -70.0;
   const MAX_REF_DBFS_60DB = -50.0;
   const QCLS_REF_DBFS_60DB = -40.0;
@@ -47,12 +48,31 @@
     return Math.max(MIN_REF_DBFS_60DB, Math.min(MAX_REF_DBFS_60DB, v));
   }
 
+  function hasExplicitRefField(obj) {
+    return (
+      obj !== null &&
+      obj !== undefined &&
+      typeof obj === "object" &&
+      obj.refDbfsRms60 !== undefined &&
+      obj.refDbfsRms60 !== null &&
+      obj.refDbfsRms60 !== "" &&
+      Number.isFinite(Number(obj.refDbfsRms60))
+    );
+  }
+
   function resolveRefDbfs60(calTable, explicitRefDbfs) {
     if (explicitRefDbfs !== undefined && explicitRefDbfs !== null && Number.isFinite(Number(explicitRefDbfs))) {
       return clampRefDbfs60(explicitRefDbfs);
     }
-    if (calTable && Number.isFinite(Number(calTable.refDbfsRms60))) {
-      return clampRefDbfs60(calTable.refDbfsRms60);
+    if (calTable && typeof calTable === "object") {
+      if (hasExplicitRefField(calTable)) {
+        return clampRefDbfs60(calTable.refDbfsRms60);
+      }
+      /* A calibration record with offsetsDb but no refDbfsRms60 field was saved by
+       * qLDM v1.0.0 at -70.0 dBFS RMS @ 60 dB SPL; keep -70.0 dBFS so levels never shift +10 dB. */
+      if (calTable.offsetsDb && typeof calTable.offsetsDb === "object") {
+        return LEGACY_V1_REF_DBFS_60DB;
+      }
     }
     return DEFAULT_REF_DBFS_60DB;
   }
@@ -1596,11 +1616,60 @@
     return JSON.stringify(payload, null, 2) + "\n";
   }
 
+  /*
+   * Normalize a stored calibration record (Follow-up 2):
+   * Any stored calibration object lacking `refDbfsRms60` (or belonging to a session
+   * saved by v1.0.0) was measured at -70.0 dBFS RMS @ 60 dB SPL and must retain
+   * -70.0 dBFS rather than inheriting the -60.0 dBFS default for new calibrations.
+   */
+  function normalizeCalibrationRecord(parsed, sessionAppVersion = null) {
+    if (!parsed || typeof parsed !== "object" || !parsed.offsetsDb || typeof parsed.offsetsDb !== "object") {
+      return null;
+    }
+    const isV1 = String(sessionAppVersion || "") === "1.0.0" || !hasExplicitRefField(parsed);
+    const refDbfsRms60 = isV1 ? LEGACY_V1_REF_DBFS_60DB : clampRefDbfs60(parsed.refDbfsRms60);
+    return {
+      ...parsed,
+      id: parsed.id || "custom",
+      name: parsed.name || "Custom Transducer",
+      couplerVerified: Boolean(parsed.couplerVerified),
+      date: parsed.date || "LegacyV1",
+      refDbfsRms60,
+      offsetsDb: { ...parsed.offsetsDb }
+    };
+  }
+
+  /*
+   * Normalize a resumed or loaded session record (Follow-up 2):
+   * Ensures a session saved under v1.0.0 (or lacking `calibration.refDbfsRms60`)
+   * retains -70.0 dBFS RMS @ 60 dB SPL for playback, UI display, and JSON export.
+   */
+  function normalizeSessionRecord(saved) {
+    if (!saved || typeof saved !== "object") return null;
+    const normCal =
+      normalizeCalibrationRecord(saved.calibration, saved.appVersion) || {
+        ...TRANSDUCER_PRESETS.er3a_nominal,
+        refDbfsRms60: String(saved.appVersion || "") === "1.0.0" ? LEGACY_V1_REF_DBFS_60DB : DEFAULT_REF_DBFS_60DB,
+        offsetsDb: { ...TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
+      };
+    const fsInfo = computeFullScale1kSpl(normCal);
+    return {
+      ...saved,
+      calibration: {
+        ...normCal,
+        refDbfsRms60: fsInfo.refDbfsRms60,
+        fullScale1kSpl: fsInfo.fullScale1kSpl,
+        gainAboveQclsDb: fsInfo.gainAboveQclsDb
+      }
+    };
+  }
+
   const api = {
     APP_VERSION,
     DEFAULT_FS,
     REF_SPL_DB,
     DEFAULT_REF_DBFS_60DB,
+    LEGACY_V1_REF_DBFS_60DB,
     MIN_REF_DBFS_60DB,
     MAX_REF_DBFS_60DB,
     QCLS_REF_DBFS_60DB,
@@ -1621,6 +1690,8 @@
     resolveRefDbfs60,
     resolveRefDigitalRms60,
     computeFullScale1kSpl,
+    normalizeCalibrationRecord,
+    normalizeSessionRecord,
     getComplexComponentFreqs,
     lookupCalOffsetDb,
     createRng,

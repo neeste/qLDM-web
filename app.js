@@ -315,16 +315,11 @@
       const raw = localStorage.getItem(CAL_STORAGE_KEY) || localStorage.getItem(LEGACY_CAL_STORAGE_KEY);
       if (!raw) return cloneCalPreset("er3a_nominal");
       const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed.offsetsDb !== "object") {
-        return cloneCalPreset("er3a_nominal");
-      }
+      const norm = QLDM.normalizeCalibrationRecord(parsed);
+      if (!norm) return cloneCalPreset("er3a_nominal");
       return {
-        id: parsed.id || "custom",
-        name: parsed.name || "Custom Transducer",
-        couplerVerified: Boolean(parsed.couplerVerified),
-        date: parsed.date || todayIsoDate(),
-        refDbfsRms60: QLDM.clampRefDbfs60(parsed.refDbfsRms60 ?? QLDM.DEFAULT_REF_DBFS_60DB),
-        offsetsDb: { ...parsed.offsetsDb }
+        ...norm,
+        date: parsed.date || todayIsoDate()
       };
     } catch (_e) {
       return cloneCalPreset("er3a_nominal");
@@ -1002,7 +997,8 @@
 
   function loadCompletedSessions() {
     try {
-      return JSON.parse(localStorage.getItem(COMPLETED_SESSIONS_KEY)) || [];
+      const arr = JSON.parse(localStorage.getItem(COMPLETED_SESSIONS_KEY)) || [];
+      return Array.isArray(arr) ? arr.map((s) => QLDM.normalizeSessionRecord(s)).filter(Boolean) : [];
     } catch (_e) {
       return [];
     }
@@ -1749,7 +1745,8 @@
       try {
         const raw = localStorage.getItem(ACTIVE_SESSION_KEY);
         if (!raw) return;
-        session = JSON.parse(raw);
+        session = QLDM.normalizeSessionRecord(JSON.parse(raw));
+        if (!session) return;
         rng = QLDM.createRng(session.rngState || session.settings?.initialSeed || 20261120);
         await ensureAudioContext();
         enterSessionFlow();
