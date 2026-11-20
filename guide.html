@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>qLDM — Clinician &amp; Tester Guide</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .guide-wrap { max-width: 960px; margin: 24px auto; padding: 0 18px 48px; }
+    .guide-card { background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 24px 28px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(15,23,42,0.06); }
+    .guide-card h2 { color: #003057; font-size: 18px; margin: 0 0 10px; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; }
+    .guide-card p, .guide-card li { font-size: 14px; line-height: 1.55; color: #1e293b; }
+    .guide-card ul, .guide-card ol { padding-left: 22px; margin: 8px 0; }
+    .guide-card code { background: #f1f5f9; padding: 2px 5px; border-radius: 4px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img src="assets/boys-town-logo.png" alt="Boys Town Logo">
+      <div>
+        <h1 class="topbar-title">qLDM — Clinician &amp; Tester Guide</h1>
+        <div class="topbar-sub">Protocol, Coupler Calibration, Headroom Verification, &amp; Component-Listening Safeguards</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <a href="index.html" class="btn btn-gold">Return to qLDM App</a>
+    </div>
+  </header>
+
+  <main class="guide-wrap">
+    <section class="guide-card">
+      <h2>1. Purpose &amp; What qLDM Measures</h2>
+      <p>
+        <strong>qLDM</strong> measures monaurally the level of a pure tone (<code>dB SPL RMS</code>) that is judged equal in loudness to a five-tone complex (<code>5TC</code>) centered geometrically on the same frequency (<code>1000 Hz</code> or <code>4000 Hz</code>):
+      </p>
+      <p style="font-weight:700; font-size:15px; color:#003057;">
+        &Delta; = (Tone Level at Equal Loudness) &minus; (Complex Level L), in dB SPL RMS.
+      </p>
+      <p>
+        A positive <code>&Delta;</code> means across-frequency loudness summation makes the complex louder than an equal-RMS pure tone (requiring a higher-level tone to match it), whereas a negative <code>&Delta;</code> means the complex is less loud than an equal-RMS tone. In particular, if a listener erroneously matches a single component of the 5-tone complex instead of the whole sound, <code>&Delta;</code> shifts to <code>&approx; &minus;7 dB</code> (<code>&minus;10 log<sub>10</sub> 5</code>) across all levels. Everything executes locally in the browser with zero network transmission.
+      </p>
+    </section>
+
+    <section class="guide-card">
+      <h2>2. Audio Path &amp; 24-Bit Dynamic Range Checklist</h2>
+      <p>
+        A session spans levels from a <code>30 dB SPL</code> pure tone up to a <code>100 dB SPL</code> five-tone complex (~<code>10 dB</code> crest factor) plus up to <code>~14.5 dB</code> of high-frequency insert-earphone roll-off compensation at <code>5657 Hz</code> (~<code>95 dB</code> peak-to-RMS span). Before calibrating or testing:
+      </p>
+      <ol>
+        <li><strong>Set OS Output Format to 24-bit (or 32-bit float) at 48,000 Hz:</strong>
+          <ul>
+            <li><em>macOS:</em> Open <code>Audio MIDI Setup</code> &rarr; Select external DAC / audio interface &rarr; Format: <code>48,000 Hz</code>, <code>2 ch 24-bit Integer</code> (or <code>32-bit Float</code>).</li>
+            <li><em>Windows:</em> Sound Control Panel &rarr; Playback Device Properties &rarr; Advanced &rarr; <code>24 bit, 48000 Hz (Studio Quality)</code>.</li>
+          </ul>
+        </li>
+        <li><strong>Disable All OS Sound Processing:</strong> Turn off Spatial Audio, loudness equalization, bass boost, and communications ducking.</li>
+        <li><strong>Lock Analog / System Gain:</strong> qLDM uses <code>&minus;70.0 dBFS RMS = 60.0 dB SPL</code> as its digital reference (30 dB more headroom than qCLS). Adjust your headphone amplifier or DAC output knob during coupler calibration so an <code>80 dB SPL</code> calibration tone reads <code>80.0 dB SPL</code> on the sound-level meter with plenty of clean analog headroom, then lock that volume setting.</li>
+        <li><strong>Strict Pre-Playback Clipping Guard:</strong> Before any trial buffer is sent to Web Audio, qLDM inspects the synthesized waveform samples directly and refuses to play any buffer whose digital peak exceeds <code>0 dBFS</code> (<code>1.0</code>) or whose coupler-calibrated RMS exceeds the active ceiling.</li>
+      </ol>
+    </section>
+
+    <section class="guide-card">
+      <h2>3. Per-Component Acoustic Coupler Calibration Protocol</h2>
+      <p>
+        Unlike pure-tone scaling at 1 kHz alone, the 1-octave complex at 4 kHz spans <code>2828 Hz</code> to <code>5657 Hz</code>, where insert earphones such as the ER-3A roll off steeply. Every component of every complex must be equalized in an acoustic coupler:
+      </p>
+      <ol>
+        <li>Connect the test transducer (e.g., Etymotic ER-3A) to a calibrated 2-cc (HA-2) or occluded-ear simulator coupler and sound-level meter.</li>
+        <li>Click <strong>Coupler Calibration &amp; Headroom</strong> in the top bar.</li>
+        <li>Select a starting preset (<code>ER-3A Insert</code> or <code>Flat 0-dB Reference</code>) and set <strong>Nominal Tone Level</strong> to <code>80 dB</code>.</li>
+        <li>Start at <code>1000.00 Hz</code>, click <strong>Play Continuous Tone</strong>, adjust your hardware output gain so the sound-level meter reads <code>80.0 dB SPL</code>, and lock the hardware volume.</li>
+        <li>Step through each of the <strong>18 pure-tone component frequencies</strong> (<code>707.11 Hz</code> to <code>5656.85 Hz</code>). At each frequency, type the meter reading into <strong>Meter Reading (dB SPL)</strong> and click <strong>Apply to Freq</strong>. The tone updates immediately so you can verify the meter now reads within <code>&plusmn;0.2 dB</code> of <code>80.0 dB SPL</code>.</li>
+        <li>Select the four <strong>Coupler Verification Complexes (5TC)</strong> at the bottom of the dropdown and confirm overall complex RMS in the coupler is within <code>&plusmn;1.0 dB</code> of nominal across levels, checking distortion at <code>100 dB SPL</code>.</li>
+        <li>Enter the transducer label and date, then click <strong>Save Coupler Calibration</strong>. Check the Pre-Session Headroom table on the main screen to confirm all stimuli show <code>OK</code> above <code>Max Output</code>.</li>
+      </ol>
+    </section>
+
+    <section class="guide-card">
+      <h2>4. Listener Instructions &amp; Component-Listening Safeguards</h2>
+      <p>
+        Because the pure tone shares the exact center frequency of the middle component of the 5-tone complex, an analytical listener who tries to &ldquo;hear out&rdquo; that middle component instead of judging the whole complex will set the tone ~<code>7 dB</code> too low (<code>10 log<sub>10</sub>(5) = 7.0 dB</code>) at every level. qLDM enforces four safeguards:
+      </p>
+      <ul>
+        <li><strong>Standardized Instruction Gate:</strong> Displayed before Practice and repeated before Block 1 (<code>1000 Hz</code>) and Block 2 (<code>4000 Hz</code>):<br>
+          <em>&ldquo;You will hear two sounds. Choose the one that was louder. Judge the loudness of the whole sound, not of a part of it, and ignore differences in pitch or quality.&rdquo;</em>
+        </li>
+        <li><strong>8-Trial Practice with Obvious Checks:</strong> Trials 1–3 present unmistakable <code>&plusmn;10–12 dB</code> level differences and report the listener's score to the tester.</li>
+        <li><strong>Post-Practice Tester Check:</strong> Prompts the tester to ask, <em>&ldquo;What did you compare between the two sounds?&rdquo;</em> before starting Block 1, with a 1-click option to repeat Practice.</li>
+        <li><strong>Automatic Block Flag &amp; Repeat:</strong> If every completed forward match in a block has <code>&Delta; &le; &minus;6.0 dB</code>, qLDM flags <code>COMPONENT_MATCH_SUSPECTED</code> and provides a 1-click <strong>Repeat Block with Instruction</strong> button (retaining both passes in the exported CSV/JSON).</li>
+      </ul>
+    </section>
+
+    <section class="guide-card">
+      <h2>5. Listener Limits &amp; Output Files</h2>
+      <ul>
+        <li><strong>Listener Limits:</strong> Enter 1 kHz and 4 kHz <code>CU 5</code> and <code>Too Loud (CU 50)</code> values manually or click <strong>Import qCLS_ELC CSV</strong> to load them directly from the participant's qCLS equal-loudness contour file. Any fixed complex level below <code>CU 5 + 10 dB</code> or above <code>Too Loud</code> / <code>Max Output</code> is skipped and recorded in <code>LM_PSE</code> with its exact reason.</li>
+        <li><strong>In-Trial &ldquo;Too Loud&rdquo; Button:</strong> Always active during testing; immediately stops playback, lowers the session ceiling by <code>5 dB</code> for the remainder of the session, and ends any track whose fixed level exceeds the new ceiling.</li>
+        <li><strong>Three Downloads (Client-Side):</strong>
+          <ul>
+            <li><code>LM_PSE_[ID]_[L|R]_[YYYYMMDD].csv</code> — One row per match (<code>&Delta;</code>, tone PSE, curvature SE, shared block <code>&sigma;</code>, track endpoints, flags, exclusion reasons).</li>
+            <li><code>LM_TBT_[ID]_[L|R]_[YYYYMMDD].csv</code> — Complete trial-by-trial log (block, pass, track, stimuli, levels, interval order, response, RT in ms, active ceiling).</li>
+            <li><code>LM_SES_[ID]_[L|R]_[YYYYMMDD].json</code> — Full provenance record (version, RNG seed, sample rate, audio devices, exact component frequencies &amp; phases, coupler calibration table, headroom limits, and PSE summary).</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

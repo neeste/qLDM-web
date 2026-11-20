@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>qLDM — Two-Interval Loudness Matching</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img src="assets/boys-town-logo.png" alt="Boys Town Logo">
+      <div>
+        <h1 class="topbar-title">qLDM — Loudness Matching</h1>
+        <div class="topbar-sub">Two-Interval Tone vs. Five-Tone Complex Loudness Matching &bull; 100% Client-Side Audio</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" id="open-cal-btn" class="btn btn-gold">Coupler Calibration &amp; Headroom</button>
+      <a href="guide.html" target="_blank" rel="noopener" class="btn btn-ghost-light">Clinician &amp; Tester Guide</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- LEFT SIDEBAR: OPERATOR SETUP -->
+    <aside class="card" id="setup-panel">
+      <h2>Session Setup</h2>
+
+      <div class="field-grid">
+        <div class="field">
+          <label for="participant-id">Participant ID</label>
+          <input type="text" id="participant-id" value="SUBJ001" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="test-ear">Test Ear</label>
+          <select id="test-ear">
+            <option value="Left">Left Ear</option>
+            <option value="Right" selected>Right Ear</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="match-set">Match Set</label>
+        <select id="match-set">
+          <option value="standard" selected>Standard Set — 12 Matches (1-oct @ 1 &amp; 4 kHz, ~10 min)</option>
+          <option value="extended">Extended Set — 24 Matches (1 &amp; 1/4-oct @ 1 &amp; 4 kHz, ~19 min)</option>
+          <option value="short4">Short Anchor Set — 4 Matches (60 &amp; 90 dB @ 1 &amp; 4 kHz, ~3 min)</option>
+        </select>
+      </div>
+
+      <label class="check-row">
+        <input type="checkbox" id="include-practice" checked>
+        <span>Run <strong>8 Practice Trials</strong> before Block 1 (includes obvious level checks)</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="include-null">
+        <span>Pilot Option: Add <strong>4 Null Matches</strong> (Tone vs. Tone @ 60 &amp; 90 dB)</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="include-reverse">
+        <span>Pilot Option: Include <strong>Reverse Matches</strong> (Fixed Tone, Varied Complex)</span>
+      </label>
+
+      <h3>Stimulus &amp; Safety Settings</h3>
+      <div class="field-grid">
+        <div class="field">
+          <label for="stim-duration">Duration (ms)</label>
+          <select id="stim-duration">
+            <option value="500" selected>500 ms (Default)</option>
+            <option value="1000">1000 ms (1.0 s)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="trials-per-track">Trials / Track</label>
+          <input type="number" id="trials-per-track" min="4" max="24" step="1" value="8">
+        </div>
+        <div class="field">
+          <label for="ramp-ms">Cosine Ramp (ms)</label>
+          <input type="number" id="ramp-ms" min="5" max="100" step="5" value="20">
+        </div>
+        <div class="field">
+          <label for="gap-ms">Interval Gap (ms)</label>
+          <input type="number" id="gap-ms" min="150" max="1000" step="50" value="400">
+        </div>
+        <div class="field">
+          <label for="max-output">Max Output (dB SPL)</label>
+          <input type="number" id="max-output" min="50" max="110" step="1" value="100">
+        </div>
+        <div class="field">
+          <label for="comp-flag-db">Component Flag (&le; dB)</label>
+          <input type="number" id="comp-flag-db" min="-15" max="-3" step="0.5" value="-6.0">
+        </div>
+      </div>
+
+      <h3>Optional Listener Limits (dB SPL)</h3>
+      <div class="muted-note" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+        <span>Excludes levels &lt; <code>CU 5 + 10 dB</code> or &gt; listener <code>Too Loud</code> (CU 50).</span>
+        <button type="button" id="import-qcls-btn" class="btn btn-outline" style="padding:4px 9px; font-size:12px;">Import qCLS_ELC CSV</button>
+        <input type="file" id="qcls-elc-file" accept=".csv,text/csv" hidden>
+      </div>
+      <div id="qcls-import-status" class="muted-note" style="margin-bottom:6px; color:#0369a1; display:none;"></div>
+      <div class="field-grid">
+        <div class="field">
+          <label for="cu5-1k">1 kHz CU 5 (dB SPL)</label>
+          <input type="number" id="cu5-1k" placeholder="Optional" min="0" max="105" step="1">
+        </div>
+        <div class="field">
+          <label for="ucl-1k">1 kHz Too Loud (dB)</label>
+          <input type="number" id="ucl-1k" placeholder="Optional" min="50" max="115" step="1">
+        </div>
+        <div class="field">
+          <label for="cu5-4k">4 kHz CU 5 (dB SPL)</label>
+          <input type="number" id="cu5-4k" placeholder="Optional" min="0" max="105" step="1">
+        </div>
+        <div class="field">
+          <label for="ucl-4k">4 kHz Too Loud (dB)</label>
+          <input type="number" id="ucl-4k" placeholder="Optional" min="50" max="115" step="1">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="rng-seed">RNG Seed</label>
+        <input type="number" id="rng-seed" value="20261120" step="1">
+      </div>
+
+      <button type="button" id="start-session-btn" class="btn btn-primary" style="width:100%; margin-top:6px; padding:12px;">
+        Begin Session
+      </button>
+
+      <div style="margin-top:14px; padding-top:12px; border-top:1px solid #e2e8f0;">
+        <label for="saved-sessions-sel" style="display:block; font-size:12px; font-weight:700; color:#475569; margin-bottom:4px;">Completed Sessions (Browser Storage)</label>
+        <div style="display:flex; gap:6px;">
+          <select id="saved-sessions-sel" style="flex:1; padding:6px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12.5px;">
+            <option value="">0 saved</option>
+          </select>
+          <button type="button" id="load-saved-btn" class="btn btn-outline" style="padding:6px 10px; font-size:12px;">Load</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- RIGHT WORKSPACE: RECOVERY BANNER, PRE-RUN HEADROOM, ACTIVE TRIALS, & RESULTS -->
+    <section>
+      <!-- Interrupted session recovery banner -->
+      <div id="resume-banner" class="banner banner-info" style="display:none;">
+        <div>
+          <strong>Saved in-progress session found:</strong>
+          <span id="resume-summary"></span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="resume-session-btn" class="btn btn-primary">Resume Session</button>
+          <button type="button" id="discard-session-btn" class="btn btn-outline">Discard</button>
+        </div>
+      </div>
+
+      <!-- Calibration status banner -->
+      <div id="cal-status-banner" class="banner banner-warn">
+        <div id="cal-status-text"></div>
+        <button type="button" id="banner-cal-btn" class="btn btn-outline">Verify Calibration</button>
+      </div>
+
+      <!-- IDLE / PRE-SESSION HEADROOM PREVIEW CARD -->
+      <div class="card" id="idle-card">
+        <h2>Pre-Session System Headroom &amp; Active Match Plan</h2>
+        <p class="muted-note">
+          Digital reference: <strong>&minus;70.0 dBFS RMS = 60.0 dB SPL</strong> (30 dB extra headroom vs. qCLS; recommend <strong>24-bit / 48 kHz</strong> OS output format with OS audio enhancements disabled). Any buffer exceeding <code>0 dBFS</code> or ceiling is refused before playback.
+        </p>
+        <div id="headroom-preview-wrap"></div>
+        <h3 style="margin-top:18px;">Active Match Table Preview (<span id="match-count-lbl">0</span> matches)</h3>
+        <div id="match-plan-preview" class="muted-note"></div>
+      </div>
+
+      <!-- ACTIVE TRIAL CARD -->
+      <div class="card trial-arena" id="trial-card" style="display:none;">
+        <div class="trial-status-bar">
+          <span id="phase-badge">Practice</span>
+          <span id="progress-badge">Trial 1 / 8</span>
+          <span id="ceiling-badge">Ceiling: 100 dB SPL</span>
+          <span id="prac-check-badge" style="color:#0369a1;"></span>
+        </div>
+
+        <div>
+          <div class="prompt-question">Which sound was louder?</div>
+          <div class="prompt-sub" id="trial-sub-status">Listen to both sounds...</div>
+
+          <div class="intervals-row">
+            <button type="button" id="choice-1-btn" class="interval-choice-btn" disabled>
+              <span>First Sound</span>
+              <span class="key-hint">Press 1</span>
+            </button>
+            <button type="button" id="choice-2-btn" class="interval-choice-btn" disabled>
+              <span>Second Sound</span>
+              <span class="key-hint">Press 2</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="trial-bottom-controls">
+          <button type="button" id="pause-btn" class="btn btn-outline">Pause / Stop</button>
+          <button type="button" id="too-loud-btn" class="btn btn-danger">Too Loud (&minus;5 dB Ceiling)</button>
+        </div>
+      </div>
+
+      <!-- RESULTS & EXPORT CARD -->
+      <div class="card" id="results-card" style="display:none; margin-top:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+          <h2 style="margin:0; border:none; padding:0;">Loudness-Matching Results (&Delta; = Tone PSE &minus; Complex Level)</h2>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" id="dl-pse-btn" class="btn btn-primary">Download Matches (LM_PSE CSV)</button>
+            <button type="button" id="dl-tbt-btn" class="btn btn-primary">Download Trials (LM_TBT CSV)</button>
+            <button type="button" id="dl-ses-btn" class="btn btn-outline">Download Session (LM_SES JSON)</button>
+          </div>
+        </div>
+
+        <!-- Component-listening alert banner -->
+        <div id="comp-flag-banner" class="banner banner-alert" style="display:none;">
+          <div id="comp-flag-text"></div>
+          <div id="comp-repeat-btns" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+        </div>
+
+        <div id="results-summary-meta" class="muted-note" style="margin-bottom:10px;"></div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="results-table">
+            <thead>
+              <tr>
+                <th>Block (Hz)</th>
+                <th>Role</th>
+                <th>Fixed Sound</th>
+                <th>Varied Sound</th>
+                <th>Fixed L (dB)</th>
+                <th>Tone PSE (dB)</th>
+                <th>&Delta; (dB)</th>
+                <th>Fit SE (dB)*</th>
+                <th>Block &sigma; (dB)</th>
+                <th>Trials</th>
+                <th>Upper / Lower End</th>
+                <th>Flags / Reason</th>
+              </tr>
+            </thead>
+            <tbody id="results-tbody"></tbody>
+          </table>
+        </div>
+        <p class="muted-note" style="margin-top:8px;">
+          *Note: With 16 trials/match, curvature-based SE underestimates true match SD by ~25%; downstream NEA model inversion uses the empirical test–retest SD from the pilot cohort.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- INSTRUCTION / BLOCK GATE MODAL -->
+  <div class="modal-backdrop" id="instruction-modal">
+    <div class="modal-box">
+      <h2 id="instr-modal-title">Listener Instructions</h2>
+      <div class="instruction-quote">
+        &ldquo;You will hear two sounds. Choose the one that was louder. Judge the loudness of the whole sound, not of a part of it, and ignore differences in pitch or quality.&rdquo;
+      </div>
+      <p id="instr-modal-note" class="muted-note"></p>
+      <div class="modal-actions">
+        <button type="button" id="instr-cancel-btn" class="btn btn-outline">Cancel</button>
+        <button type="button" id="instr-ok-btn" class="btn btn-primary">OK — Begin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- POST-PRACTICE TESTER CHECK MODAL -->
+  <div class="modal-backdrop" id="practice-check-modal">
+    <div class="modal-box">
+      <h2>Practice Complete — Tester Comprehension Check</h2>
+      <p id="practice-score-summary" style="font-weight:700; color:#0f172a;"></p>
+      <div class="instruction-quote" style="font-size:15px;">
+        Tester prompt: Ask the listener, <em>&ldquo;What did you compare between the two sounds?&rdquo;</em><br>
+        Confirm they compared the <strong>overall loudness of the whole sound</strong> (and did not try to listen out a single component pitch).
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="repeat-practice-btn" class="btn btn-outline">Repeat Practice (8 Trials)</button>
+        <button type="button" id="proceed-block1-btn" class="btn btn-primary">Confirmed — Proceed to Block 1</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAUSE / STOP MODAL -->
+  <div class="modal-backdrop" id="pause-modal">
+    <div class="modal-box">
+      <h2>Session Paused</h2>
+      <p class="muted-note">
+        Progress is saved automatically after every trial. You can resume where you left off, restart from Trial 1 keeping all current settings, or return to Setup.
+      </p>
+      <div class="modal-actions">
+        <button type="button" id="pause-return-btn" class="btn btn-outline">Return to Setup</button>
+        <button type="button" id="pause-restart-btn" class="btn btn-gold">Restart Session (Keep Settings)</button>
+        <button type="button" id="pause-resume-btn" class="btn btn-primary">Resume Testing</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PER-COMPONENT COUPLER CALIBRATION MODAL -->
+  <div class="modal-backdrop" id="cal-modal">
+    <div class="modal-box wide">
+      <h2>Per-Frequency Coupler Calibration &amp; Unclipped Headroom</h2>
+      <p class="muted-note">
+        Measure each component frequency in an acoustic coupler at fixed system output volume (24-bit, 48 kHz, OS enhancements off). Enter the sound-level meter reading (<code>dB SPL</code>) while playing the continuous calibration tone: the app sets <code>Offset = Measured SPL &minus; Nominal Tone Level</code> so all five components of every complex have equal acoustic SPL.
+      </p>
+
+      <div class="field-grid" style="grid-template-columns: 2fr 1fr 1fr; margin-top:10px;">
+        <div class="field">
+          <label for="cal-preset-sel">Load Preset</label>
+          <select id="cal-preset-sel">
+            <option value="er3a_nominal">ER-3A Insert (Nominal Starting Curve)</option>
+            <option value="flat_ref">Flat 0-dB Reference</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cal-transducer-name">Transducer Label</label>
+          <input type="text" id="cal-transducer-name" value="Etymotic ER-3A">
+        </div>
+        <div class="field">
+          <label for="cal-date-input">Calibration Date</label>
+          <input type="date" id="cal-date-input">
+        </div>
+      </div>
+
+      <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:7px; padding:12px; margin:10px 0;">
+        <div style="display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap;">
+          <div class="field" style="margin:0; min-width:170px;">
+            <label for="cal-tone-freq">Continuous Tone Freq (Hz)</label>
+            <select id="cal-tone-freq"></select>
+          </div>
+          <div class="field" style="margin:0; width:150px;">
+            <label for="cal-tone-spl">Nominal Tone Level (dB)</label>
+            <input type="number" id="cal-tone-spl" value="80" min="50" max="95" step="1">
+          </div>
+          <div class="field" style="margin:0; width:130px;">
+            <label for="cal-tone-ear">Output Channel</label>
+            <select id="cal-tone-ear">
+              <option value="Left">Left</option>
+              <option value="Right" selected>Right</option>
+            </select>
+          </div>
+          <button type="button" id="cal-play-btn" class="btn btn-primary">Play Continuous Tone</button>
+          <div class="field" style="margin:0; width:165px;">
+            <label for="cal-measured-spl">Meter Reading (dB SPL)</label>
+            <input type="number" id="cal-measured-spl" placeholder="e.g. 79.5" step="0.1">
+          </div>
+          <button type="button" id="cal-apply-meas-btn" class="btn btn-gold">Apply to Freq</button>
+        </div>
+        <div id="cal-tone-readout" class="muted-note" style="margin-top:8px;">Tone stopped.</div>
+      </div>
+
+      <div style="max-height:250px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px;">
+        <table class="data-table" style="margin:0;">
+          <thead>
+            <tr>
+              <th>Component Freq (Hz)</th>
+              <th>Used In</th>
+              <th>Sensitivity Offset (dB re Nominal)</th>
+              <th>Digital Boost Applied (dB)</th>
+            </tr>
+          </thead>
+          <tbody id="cal-table-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" id="cal-close-btn" class="btn btn-outline">Close</button>
+        <button type="button" id="cal-save-btn" class="btn btn-primary">Save Coupler Calibration</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="qldm_core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
