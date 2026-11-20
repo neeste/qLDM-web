@@ -3,7 +3,8 @@
  * persistence, and CSV/JSON export controller for qLDM (Quick Loudness Matching).
  *
  * All stimulus synthesis, buffer-level acoustic/clipping guards, adaptive track
- * stepping, and block maximum-likelihood logistic fitting live in qldm_core.js.
+ * stepping, block maximum-likelihood logistic fitting, and CSV/JSON formatters
+ * live in qldm_core.js.
  */
 (function () {
   "use strict";
@@ -13,7 +14,8 @@
     throw new Error("QLDMCore failed to load before app.js.");
   }
 
-  const CAL_STORAGE_KEY = "qLDM_calibration_v1";
+  const CAL_STORAGE_KEY = "qLDM_calibration_v2";
+  const LEGACY_CAL_STORAGE_KEY = "qLDM_calibration_v1";
   const ACTIVE_SESSION_KEY = "qLDM_active_session_v1";
   const COMPLETED_SESSIONS_KEY = "qLDM_completed_sessions_v1";
   const COMPLETED_SESSIONS_MAX = 30;
@@ -59,6 +61,7 @@
     openCalBtn: $("open-cal-btn"),
 
     idleCard: $("idle-card"),
+    idleRefSummary: $("idle-ref-summary"),
     headroomPreviewWrap: $("headroom-preview-wrap"),
     matchCountLbl: $("match-count-lbl"),
     matchPlanPreview: $("match-plan-preview"),
@@ -84,6 +87,12 @@
     resultsSummaryMeta: $("results-summary-meta"),
     resultsTbody: $("results-tbody"),
 
+    gainConfirmModal: $("gain-confirm-modal"),
+    gainConfirmDetails: $("gain-confirm-details"),
+    gainConfirmChk: $("gain-confirm-chk"),
+    gainConfirmCancelBtn: $("gain-confirm-cancel-btn"),
+    gainConfirmOkBtn: $("gain-confirm-ok-btn"),
+
     instructionModal: $("instruction-modal"),
     instrModalTitle: $("instr-modal-title"),
     instrModalNote: $("instr-modal-note"),
@@ -102,16 +111,21 @@
 
     calModal: $("cal-modal"),
     calPresetSel: $("cal-preset-sel"),
+    calRefDbfs: $("cal-ref-dbfs"),
     calTransducerName: $("cal-transducer-name"),
     calDateInput: $("cal-date-input"),
+    calFullscaleReadout: $("cal-fullscale-readout"),
     calToneFreq: $("cal-tone-freq"),
     calToneSpl: $("cal-tone-spl"),
+    calLvl30Btn: $("cal-lvl-30-btn"),
+    calLvl80Btn: $("cal-lvl-80-btn"),
     calToneEar: $("cal-tone-ear"),
     calPlayBtn: $("cal-play-btn"),
     calMeasuredSpl: $("cal-measured-spl"),
     calApplyMeasBtn: $("cal-apply-meas-btn"),
     calToneReadout: $("cal-tone-readout"),
     calTableTbody: $("cal-table-tbody"),
+    calSaveErr: $("cal-save-err"),
     calCloseBtn: $("cal-close-btn"),
     calSaveBtn: $("cal-save-btn")
   };
@@ -127,8 +141,9 @@
   let itiTimerId = null;
   let awaitingResponse = false;
   let responseEnabledPerfNow = 0;
-  let currentPresentation = null; // transient info for currently playing/awaiting trial
+  let currentPresentation = null;
   let instrModalCallbacks = { onOk: null, onCancel: null };
+  let gainModalCallback = null;
   let importedQclsFilename = "";
 
   let calState = loadCalibrationState();
@@ -173,13 +188,12 @@
     return `${centerHz} Hz 5TC (1-oct)`;
   }
 
-  function csvEscape(val) {
-    if (val === null || val === undefined) return "";
-    const s = String(val);
-    if (/[",\n\r]/.test(s)) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function triggerDownload(content, filename, mimeType) {
@@ -257,9 +271,6 @@
     const src = audioCtx.createBufferSource();
     src.buffer = audioBuf;
 
-    /* Strict monaural routing via 2-channel ChannelMergerNode:
-     * Left ear -> input 0 (L), input 1 (R) receives 0.0 silence;
-     * Right ear -> input 1 (R), input 0 (L) receives 0.0 silence. */
     const merger = audioCtx.createChannelMerger(2);
     const outChannel = ear === "Left" ? 0 : 1;
     src.connect(merger, 0, outChannel);
@@ -287,20 +298,21 @@
   /* -------------------------------------------------------------------------
    * Coupler Calibration Persistence & UI
    * ------------------------------------------------------------------------- */
-  function cloneCalPreset(presetKey) {
+  function cloneCalPreset(presetKey, refDbfsOverride) {
     const base = QLDM.TRANSDUCER_PRESETS[presetKey] || QLDM.TRANSDUCER_PRESETS.er3a_nominal;
     return {
       id: base.id,
       name: base.name,
       couplerVerified: Boolean(base.couplerVerified),
       date: base.date || todayIsoDate(),
+      refDbfsRms60: QLDM.clampRefDbfs60(refDbfsOverride ?? base.refDbfsRms60 ?? QLDM.DEFAULT_REF_DBFS_60DB),
       offsetsDb: { ...base.offsetsDb }
     };
   }
 
   function loadCalibrationState() {
     try {
-      const raw = localStorage.getItem(CAL_STORAGE_KEY);
+      const raw = localStorage.getItem(CAL_STORAGE_KEY) || localStorage.getItem(LEGACY_CAL_STORAGE_KEY);
       if (!raw) return cloneCalPreset("er3a_nominal");
       const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed.offsetsDb !== "object") {
@@ -311,6 +323,7 @@
         name: parsed.name || "Custom Transducer",
         couplerVerified: Boolean(parsed.couplerVerified),
         date: parsed.date || todayIsoDate(),
+        refDbfsRms60: QLDM.clampRefDbfs60(parsed.refDbfsRms60 ?? QLDM.DEFAULT_REF_DBFS_60DB),
         offsetsDb: { ...parsed.offsetsDb }
       };
     } catch (_e) {
@@ -324,6 +337,7 @@
       name: String(state.name || "Custom Transducer").trim(),
       couplerVerified: Boolean(state.couplerVerified),
       date: state.date || todayIsoDate(),
+      refDbfsRms60: QLDM.clampRefDbfs60(state.refDbfsRms60),
       offsetsDb: { ...state.offsetsDb }
     };
     try {
@@ -349,32 +363,38 @@
   }
 
   function renderCalibrationStatusBanner() {
+    const fsInfo = QLDM.computeFullScale1kSpl(calState);
     const fsNote = audioCtx && audioCtx.sampleRate !== QLDM.DEFAULT_FS
-      ? ` • Audio clock: ${audioCtx.sampleRate} Hz`
+      ? ` &bull; Audio clock: ${audioCtx.sampleRate} Hz`
       : "";
+    const refNote = ` &bull; Ref: <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS</code> = 60 dB SPL (1 kHz 0 dBFS = <code>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</code>)`;
     if (calState.couplerVerified) {
       dom.calStatusBanner.className = "banner banner-ok";
       dom.calStatusText.innerHTML =
         `<strong>Coupler-Verified Calibration Active:</strong> ${escapeHtml(calState.name)} ` +
-        `(calibrated <code>${escapeHtml(calState.date)}</code>)${fsNote}`;
+        `(calibrated <code>${escapeHtml(calState.date)}</code>)${refNote}${fsNote}`;
     } else {
       dom.calStatusBanner.className = "banner banner-warn";
       dom.calStatusText.innerHTML =
         `<strong>Unverified Preset Active:</strong> ${escapeHtml(calState.name)}. ` +
-        `Measure all 18 component frequencies in an acoustic coupler before human testing.${fsNote}`;
+        `Measure all 18 component frequencies in your qCLS coupler before human testing.${refNote}${fsNote}`;
     }
-  }
-
-  function escapeHtml(s) {
-    return String(s ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
   }
 
   /* Working draft while the calibration modal is open */
   let modalCalDraft = null;
+
+  function renderModalFullScaleReadout() {
+    if (!modalCalDraft) return;
+    const info = QLDM.computeFullScale1kSpl(modalCalDraft);
+    const gainSign = info.gainAboveQclsDb >= 0 ? "+" : "";
+    dom.calFullscaleReadout.innerHTML =
+      `<div>` +
+      `<strong>Nominal Full-Scale (0 dBFS peak) 1 kHz Tone:</strong> <code>${info.fullScale1kSpl.toFixed(1)} dB SPL</code> &bull; ` +
+      `<strong>Digital Ref:</strong> <code>${info.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</code> &bull; ` +
+      `<strong>Analog Gain vs. qCLS (&minus;40 dBFS):</strong> <code>${gainSign}${info.gainAboveQclsDb.toFixed(1)} dB</code>` +
+      `</div>`;
+  }
 
   function populateCalToneDropdown() {
     dom.calToneFreq.innerHTML = "";
@@ -409,21 +429,24 @@
   function renderCalModalTable() {
     if (!modalCalDraft) return;
     dom.calTableTbody.innerHTML = "";
+    dom.calSaveErr.style.display = "none";
+
     for (const f of QLDM.CALIBRATION_FREQS) {
       const key = String(f);
       const off = QLDM.lookupCalOffsetDb(modalCalDraft, f);
-      const boost = -off;
+      const hasVal = Number.isFinite(off);
+      const boost = hasVal ? -off : NaN;
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td><strong>${f.toFixed(2)}</strong></td>
         <td style="font-size:12px; color:#475569;">${escapeHtml(describeComponentUsage(f))}</td>
         <td>
           <input type="number" step="0.1" min="-35" max="25" data-cal-freq="${key}"
-                 value="${off.toFixed(1)}"
+                 value="${hasVal ? off.toFixed(1) : ""}"
                  style="width:95px; padding:4px 6px; border:1px solid #cbd5e1; border-radius:5px; font-size:13px;">
         </td>
-        <td data-boost-for="${key}" style="font-family:monospace; color:${boost > 0.05 ? "#b45309" : "#0f172a"};">
-          ${boost >= 0 ? "+" : ""}${boost.toFixed(1)} dB
+        <td data-boost-for="${key}" style="font-family:monospace; color:${hasVal && boost > 0.05 ? "#b45309" : hasVal ? "#0f172a" : "#b91c1c"};">
+          ${hasVal ? `${boost >= 0 ? "+" : ""}${boost.toFixed(1)} dB` : "MISSING"}
         </td>
       `;
       dom.calTableTbody.appendChild(tr);
@@ -432,18 +455,26 @@
     dom.calTableTbody.querySelectorAll("input[data-cal-freq]").forEach((inp) => {
       inp.addEventListener("input", () => {
         const k = inp.getAttribute("data-cal-freq");
-        const v = Number(inp.value);
-        if (Number.isFinite(v)) {
+        const raw = inp.value.trim();
+        const boostCell = dom.calTableTbody.querySelector(`[data-boost-for="${k}"]`);
+        if (raw === "" || !Number.isFinite(Number(raw))) {
+          delete modalCalDraft.offsetsDb[k];
+          if (boostCell) {
+            boostCell.textContent = "MISSING";
+            boostCell.style.color = "#b91c1c";
+          }
+        } else {
+          const v = Number(raw);
           modalCalDraft.offsetsDb[k] = Number(v.toFixed(2));
-          const boostCell = dom.calTableTbody.querySelector(`[data-boost-for="${k}"]`);
           if (boostCell) {
             const b = -v;
             boostCell.textContent = `${b >= 0 ? "+" : ""}${b.toFixed(1)} dB`;
             boostCell.style.color = b > 0.05 ? "#b45309" : "#0f172a";
           }
-          if (isCalPlaying) {
-            startCalibrationTone();
-          }
+        }
+        renderModalFullScaleReadout();
+        if (isCalPlaying) {
+          startCalibrationTone();
         }
       });
     });
@@ -456,15 +487,19 @@
       name: calState.name || "Etymotic ER-3A",
       couplerVerified: calState.couplerVerified,
       date: (/^\d{4}-\d{2}-\d{2}$/.test(calState.date) ? calState.date : todayIsoDate()),
+      refDbfsRms60: QLDM.clampRefDbfs60(calState.refDbfsRms60),
       offsetsDb: { ...calState.offsetsDb }
     };
     dom.calPresetSel.value = QLDM.TRANSDUCER_PRESETS[modalCalDraft.id] ? modalCalDraft.id : "er3a_nominal";
+    dom.calRefDbfs.value = modalCalDraft.refDbfsRms60.toFixed(1);
     dom.calTransducerName.value = modalCalDraft.name;
     dom.calDateInput.value = modalCalDraft.date;
     dom.calToneEar.value = dom.testEar.value;
     dom.calMeasuredSpl.value = "";
     dom.calToneReadout.textContent = "Tone stopped.";
+    dom.calSaveErr.style.display = "none";
     populateCalToneDropdown();
+    renderModalFullScaleReadout();
     renderCalModalTable();
     dom.calModal.classList.add("open");
   }
@@ -499,6 +534,7 @@
     const selVal = dom.calToneFreq.value;
     const nomSpl = Number(dom.calToneSpl.value || 80);
     const ear = dom.calToneEar.value;
+    const activeCal = modalCalDraft || calState;
 
     let centerHz = 1000;
     let sound = QLDM.SOUND_TONE;
@@ -512,8 +548,6 @@
       sound = bw === 0.25 ? QLDM.SOUND_QOCT : QLDM.SOUND_1OCT;
     }
 
-    /* Synthesize a 12-second smooth-ramped buffer (repeatable) through the exact
-     * stimulus & safety pipeline so coupler checks test the exact waveform path. */
     const wave = QLDM.generateSoundWaveform({
       centerHz,
       sound,
@@ -521,14 +555,14 @@
       sampleRate: fs,
       durationMs: 12000,
       rampMs: 20,
-      calTable: modalCalDraft || calState,
+      calTable: activeCal,
       ceilingSpl: QLDM.EQUIPMENT_MAX_SPL
     });
 
     if (!wave.ok) {
       dom.calToneReadout.innerHTML =
         `<span style="color:#b91c1c; font-weight:700;">Refused to play (${escapeHtml(wave.reason)}): ` +
-        `digital peak = ${Number.isFinite(wave.peak) ? wave.peak.toFixed(3) : "--"}. Lower nominal SPL or boost.</span>`;
+        `digital peak = ${Number.isFinite(wave.peak) ? wave.peak.toFixed(3) : "--"}. Check calibration offset or lower nominal SPL.</span>`;
       return;
     }
 
@@ -575,16 +609,15 @@
       return;
     }
 
-    /* Since the calibration tone is played WITH curOffset active, any discrepancy
-     * (measSpl - nomSpl) updates curOffset -> curOffset + (measSpl - nomSpl) so that
-     * re-measuring immediately yields nomSpl (idempotent whether starting from Flat or ER-3A). */
-    const curOff = QLDM.lookupCalOffsetDb(modalCalDraft, freqHz);
+    const curOffRaw = QLDM.lookupCalOffsetDb(modalCalDraft, freqHz);
+    const curOff = Number.isFinite(curOffRaw) ? curOffRaw : 0.0;
     const updatedOff = Number((curOff + (measSpl - nomSpl)).toFixed(2));
     const exactKey = QLDM.CALIBRATION_FREQS.find((f) => Math.abs(f - freqHz) < 0.01);
     if (exactKey !== undefined) {
       modalCalDraft.offsetsDb[String(exactKey)] = updatedOff;
     }
     modalCalDraft.id = "custom_coupler";
+    renderModalFullScaleReadout();
     renderCalModalTable();
     if (isCalPlaying) {
       startCalibrationTone();
@@ -660,6 +693,18 @@
   function renderIdlePreview() {
     const cfg = readSetupSettings();
     const fs = audioCtx ? audioCtx.sampleRate : QLDM.DEFAULT_FS;
+    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const gainSign = fsInfo.gainAboveQclsDb >= 0 ? "+" : "";
+
+    if (dom.idleRefSummary) {
+      dom.idleRefSummary.innerHTML =
+        `Digital reference: <strong>${fsInfo.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</strong> ` +
+        `(<strong>${gainSign}${fsInfo.gainAboveQclsDb.toFixed(1)} dB</strong> analog gain re qCLS; ` +
+        `nominal full-scale 1 kHz tone = <strong>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</strong>; ` +
+        `<strong>24-bit / 48 kHz</strong> OS output path required with OS enhancements disabled). ` +
+        `Any buffer exceeding <code>0 dBFS</code>, missing calibration, or exceeding ceiling is refused before playback.`;
+    }
+
     const headroom = QLDM.computeMaxUnclippedLevels(calState, {
       durationMs: cfg.durationMs,
       rampMs: cfg.rampMs,
@@ -678,6 +723,16 @@
     </tr></thead><tbody>`;
 
     for (const h of visibleHeadroom) {
+      if (!h.ok) {
+        html += `<tr>
+          <td><strong>${escapeHtml(h.label)}</strong></td>
+          <td>--</td>
+          <td>--</td>
+          <td>--</td>
+          <td><span class="tag tag-flag">${escapeHtml(h.reason)}</span></td>
+        </tr>`;
+        continue;
+      }
       const crestDb = 20 * Math.log10(h.crestFactor);
       const pkDb = 20 * Math.log10(Math.max(h.peakAt60dB, 1e-12));
       const margin = h.maxUnclippedSpl - cfg.initialMaxOutputSpl;
@@ -768,7 +823,6 @@
     if (cu5_4k !== null) dom.cu5_4k.value = cu5_4k.toFixed(1);
     if (ucl_4k !== null) dom.ucl_4k.value = ucl_4k.toFixed(1);
 
-    /* Match qCLS filename convention qCLS_ELC_[ID]_[L|R]_[YYYYMMDD].csv if present */
     const m = /^qCLS_ELC_(.+)_([LR])_(\d{8})\.csv$/i.exec(filename);
     if (m) {
       dom.participantId.value = m[1];
@@ -782,6 +836,28 @@
       `Imported limits from ${filename}: 1k [CU5=${cu5_1k !== null ? cu5_1k.toFixed(1) : "--"}, CU50=${ucl_1k !== null ? ucl_1k.toFixed(1) : "--"}], ` +
       `4k [CU5=${cu5_4k !== null ? cu5_4k.toFixed(1) : "--"}, CU50=${ucl_4k !== null ? ucl_4k.toFixed(1) : "--"}] dB SPL.`;
     renderIdlePreview();
+  }
+
+  /* -------------------------------------------------------------------------
+   * Operator Analog Gain Confirmation Gate (Follow-up Request 1.4)
+   * ------------------------------------------------------------------------- */
+  function openGainConfirmationModal(onConfirmed) {
+    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const gainSign = fsInfo.gainAboveQclsDb >= 0 ? "+" : "";
+    dom.gainConfirmDetails.innerHTML =
+      `<strong>Active Transducer:</strong> ${escapeHtml(calState.name)}<br>` +
+      `<strong>qLDM Digital Reference:</strong> <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</code><br>` +
+      `<strong>Analog Gain Relative to qCLS:</strong> <code>${gainSign}${fsInfo.gainAboveQclsDb.toFixed(1)} dB</code><br>` +
+      `<strong>Nominal Full-Scale (0 dBFS) 1 kHz Tone:</strong> <code>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</code>`;
+    dom.gainConfirmChk.checked = false;
+    dom.gainConfirmOkBtn.disabled = true;
+    gainModalCallback = onConfirmed;
+    dom.gainConfirmModal.classList.add("open");
+  }
+
+  function closeGainConfirmationModal() {
+    dom.gainConfirmModal.classList.remove("open");
+    gainModalCallback = null;
   }
 
   /* -------------------------------------------------------------------------
@@ -821,7 +897,7 @@
     };
   }
 
-  async function buildNewSessionFromSetup() {
+  async function buildNewSessionFromSetup(gainConfirmationRecord) {
     await ensureAudioContext();
     const outputDevices = await queryOutputDevicesSafe();
     const cfg = readSetupSettings();
@@ -850,6 +926,7 @@
       rampMs: cfg.rampMs,
       sampleRate: fs
     });
+    const fsInfo = QLDM.computeFullScale1kSpl(calState);
 
     session = {
       sessionId: `QLDM_${Date.now()}`,
@@ -860,6 +937,13 @@
       ear: cfg.ear,
       earCode: cfg.earCode,
       settings: cfg,
+      analogGainConfirmation: gainConfirmationRecord || {
+        confirmed: true,
+        confirmed_at_iso: new Date().toISOString(),
+        ref_dbfs_rms_at_60db_spl: fsInfo.refDbfsRms60,
+        analog_gain_above_qcls_db: fsInfo.gainAboveQclsDb,
+        full_scale_1khz_spl_db: fsInfo.fullScale1kSpl
+      },
       audioInfo: {
         requestedSampleRate: QLDM.DEFAULT_FS,
         grantedSampleRate: fs,
@@ -867,6 +951,9 @@
       },
       calibration: {
         ...calState,
+        refDbfsRms60: fsInfo.refDbfsRms60,
+        fullScale1kSpl: fsInfo.fullScale1kSpl,
+        gainAboveQclsDb: fsInfo.gainAboveQclsDb,
         offsetsDb: { ...calState.offsetsDb },
         maxUnclippedLevels: headroom
       },
@@ -1051,7 +1138,6 @@
   }
 
   function openCurrentBlockGateModal() {
-    /* Advance past any block with zero runnable tracks (e.g., all levels excluded) */
     while (session.activeBlockArrayIndex < session.blocks.length) {
       const blk = session.blocks[session.activeBlockArrayIndex];
       const runnable = countRemainingTrialsInBlock(blk);
@@ -1124,9 +1210,6 @@
   }
 
   function buildPracticeTrialSpec() {
-    /* Comfortable practice complex level: min(65, ceiling - 15), bounded >= 45 dB SPL.
-     * Offsets: Trials 1–3 are +/-10..12 dB obvious comprehension checks (Advice Section 7);
-     * Trials 4–8 step inward across both sides so listener hears typical match differences. */
     const p = session.practice;
     const fixedSpl = Math.max(45, Math.min(65, session.ceilingSpl - 15));
     const offsets = [+12, -12, +10, -8, +6, -6, +4, -4];
@@ -1257,8 +1340,6 @@
       ceilingSpl: session.ceilingSpl
     });
 
-    /* Pre-playback digital clipping & calibrated ceiling guard (Advice Section 3):
-     * Refuse to play any buffer that would clip (> 0 dBFS) or exceed ceiling! */
     if (!tb.ok) {
       if (spec.isPractice) {
         session.practice.trialIndex += 1;
@@ -1320,8 +1401,6 @@
       responseEnabledPerfNow = performance.now();
     });
 
-    /* Animate neutral interval border highlight using hardware AudioContext clock
-     * (never distinguishes tone from complex). */
     const tick = () => {
       if (!activeSource || !audioCtx) return;
       const elapsed = audioCtx.currentTime - startAudioSec;
@@ -1420,77 +1499,7 @@
     dom.choice1Btn.disabled = true;
     dom.choice2Btn.disabled = true;
 
-    const oldCeiling = session.ceilingSpl;
-    const newCeiling = Math.max(QLDM.MIN_VARIED_SPL + 15.0, oldCeiling - 5.0);
-    session.ceilingSpl = newCeiling;
-
-    /* Apply new ceiling across ALL blocks in the session (Spec Section 6):
-     * lowers ceiling by 5 dB for the rest of the session and ends every track
-     * whose fixed complex is above the new ceiling. */
-    for (const blk of session.blocks) {
-      blk.matches.forEach((m, idx) => {
-        const pair = blk.pairs[idx];
-        if (!pair || (!pair.upper && !pair.lower)) return;
-        const hadTrials =
-          (pair.upper ? pair.upper.trialsCompleted : 0) +
-          (pair.lower ? pair.lower.trialsCompleted : 0);
-        if (m.fixedLevelSpl > newCeiling + 1e-9 && hadTrials === 0 && !m.excludedReason) {
-          m.excludedReason = `TOO_LOUD_CEILING (${newCeiling.toFixed(1)})`;
-        }
-        if (pair.upper) QLDM.applyCeilingChangeToTrack(pair.upper, newCeiling);
-        if (pair.lower) QLDM.applyCeilingChangeToTrack(pair.lower, newCeiling);
-      });
-    }
-
-    const p = currentPresentation;
-    session.tooLoudEvents.push({
-      timestampIso: new Date().toISOString(),
-      phase: session.phase,
-      blockPass: p ? p.blockPass : null,
-      blockHz: p ? p.blockHz : null,
-      matchId: p ? p.matchId : null,
-      trackId: p ? p.trackId : null,
-      fixedLevelSpl: p ? p.fixedLevelSpl : null,
-      variedLevelSpl: p ? p.variedLevelSpl : null,
-      oldCeilingSpl: oldCeiling,
-      newCeilingSpl: newCeiling
-    });
-
-    if (p) {
-      session.tbtRows.push({
-        phase: p.isPractice ? "practice" : "block",
-        blockPass: p.blockPass,
-        blockHz: p.blockHz,
-        matchId: p.matchId,
-        role: p.role,
-        trackId: p.trackId,
-        trackSlot: p.trackSlot,
-        trialInBlock: p.isPractice ? session.practice.trialIndex + 1 : session.blocks[session.activeBlockArrayIndex].trialsInBlockCompleted + 1,
-        trialInTrack: p.isPractice ? session.practice.trialIndex + 1 : (p.trackRef ? p.trackRef.trialsCompleted + 1 : 0),
-        centerHz: p.centerHz,
-        bandwidthOct: p.bandwidthOct,
-        fixedSound: p.fixedSound.label,
-        variedSound: p.variedSound.label,
-        fixedLevelSpl: p.fixedLevelSpl,
-        variedLevelSpl: p.variedLevelSpl,
-        variedInterval: p.variedInterval,
-        interval1Sound: p.sound1.label,
-        interval1Spl: p.level1Spl,
-        interval2Sound: p.sound2.label,
-        interval2Spl: p.level2Spl,
-        responseInterval: "TOO_LOUD",
-        variedJudgedLouder: "",
-        tooLoud: 1,
-        rtMs: "",
-        ceilingSpl: newCeiling,
-        guardStatus: "TOO_LOUD_PRESSED"
-      });
-      /* If varied sound alone exceeded the new ceiling on a still-active track, clamp it */
-      if (!p.isPractice && p.trackRef && !p.trackRef.finished) {
-        QLDM.applyCeilingChangeToTrack(p.trackRef, newCeiling);
-      }
-    }
-
+    const { oldCeiling, newCeiling } = QLDM.applyTooLoudToSession(session, currentPresentation);
     currentPresentation = null;
     updateTrialBadges();
     persistActiveSession();
@@ -1550,46 +1559,8 @@
     renderResultsCard();
   }
 
-  function collectAllPseRows(sess) {
-    const out = [];
-    for (const blk of sess.blocks) {
-      const ev = blk.evalSummary || QLDM.evaluateBlockMatches(blk.matches, blk.pairs, {
-        componentFlagThresholdDb: sess.settings.compFlagDb
-      });
-      for (const r of ev.rows) {
-        const bwOct =
-          r.fixedSound.kind === "complex"
-            ? r.fixedSound.bwOct
-            : r.variedSound.kind === "complex"
-              ? r.variedSound.bwOct
-              : 0.0;
-        out.push({
-          blockPass: blk.blockPass,
-          centerHz: r.centerHz,
-          bandwidthOct: bwOct,
-          role: r.role,
-          fixedSound: r.fixedSound,
-          variedSound: r.variedSound,
-          fixedLevelSpl: r.fixedLevelSpl,
-          toneEqualSpl: r.toneEqualSpl,
-          variedPseSpl: r.variedPseSpl,
-          deltaDb: r.deltaDb,
-          seDb: r.seDb,
-          sharedSigmaDb: r.sharedSigmaDb,
-          nTrials: r.nTrials,
-          upperEndSpl: r.upperEndSpl,
-          lowerEndSpl: r.lowerEndSpl,
-          flags: r.flags || [],
-          leftOutReason: r.leftOutReason || ""
-        });
-      }
-    }
-    return out;
-  }
-
   function repeatFlaggedBlockWithInstruction(centerHz) {
     if (!session) return;
-    /* Find highest pass for this centerHz so far */
     const existingForHz = session.blocks.filter((b) => b.centerHz === centerHz);
     const nextPass = existingForHz.length + 1;
     const allMatches = QLDM.buildMatchTable({
@@ -1610,7 +1581,8 @@
   function renderResultsCard() {
     if (!session) return;
     dom.resultsCard.style.display = "block";
-    const rows = collectAllPseRows(session);
+    const rows = QLDM.collectSessionPseRows(session);
+    const fsInfo = QLDM.computeFullScale1kSpl(session.calibration);
 
     const nScoredTrials = session.tbtRows.filter((t) => t.phase === "block" && t.tooLoud === 0 && t.guardStatus === "OK").length;
     dom.resultsSummaryMeta.innerHTML =
@@ -1619,9 +1591,10 @@
       `<strong>Date:</strong> ${escapeHtml(session.dateYmd)} &bull; ` +
       `<strong>Scored Trials:</strong> ${nScoredTrials} &bull; ` +
       `<strong>Final Ceiling:</strong> ${session.ceilingSpl.toFixed(1)} dB SPL &bull; ` +
+      `<strong>Ref:</strong> ${fsInfo.refDbfsRms60.toFixed(1)} dBFS = 60 dB SPL &bull; ` +
       `<strong>Sample Rate:</strong> ${session.audioInfo?.grantedSampleRate || QLDM.DEFAULT_FS} Hz`;
 
-    /* Check latest pass of each frequency for COMPONENT_MATCH_SUSPECTED */
+    /* Check latest pass of each frequency for COMPONENT_MATCH_SUSPECTED (1-oct forward matches) */
     const latestFlaggedHz = [];
     for (const fc of QLDM.CENTER_FREQS_HZ) {
       const blks = session.blocks.filter((b) => b.centerHz === fc);
@@ -1640,7 +1613,7 @@
       dom.compFlagBanner.style.display = "flex";
       const hzList = latestFlaggedHz.map((x) => `${x.fc} Hz (Pass ${x.pass})`).join(" and ");
       dom.compFlagText.innerHTML =
-        `<strong>Component-Listening Flag (${escapeHtml(hzList)}):</strong> Every completed forward match in the block had ` +
+        `<strong>Component-Listening Flag (${escapeHtml(hzList)}):</strong> Every completed forward 1-octave match in the block had ` +
         `&Delta; &le; ${session.settings.compFlagDb.toFixed(1)} dB (matching a single component of 5 tones shifts &Delta; by &minus;7 dB). ` +
         `Re-instruct the listener to judge the <strong>whole sound</strong> and repeat the flagged block.`;
       dom.compRepeatBtns.innerHTML = "";
@@ -1665,6 +1638,10 @@
         Number.isFinite(r.upperEndSpl) && Number.isFinite(r.lowerEndSpl)
           ? `${r.upperEndSpl.toFixed(1)} / ${r.lowerEndSpl.toFixed(1)}`
           : "--";
+      const ceilTxt =
+        r.nAtCeiling > 0
+          ? `${r.nAtCeilingFixedLouder} / ${r.nAtCeiling}`
+          : "0";
 
       let flagHtml = "";
       if (r.leftOutReason) {
@@ -1688,216 +1665,12 @@
         <td>${r.seDb !== null ? r.seDb.toFixed(2) : "--"}</td>
         <td>${r.sharedSigmaDb !== null && Number.isFinite(r.sharedSigmaDb) ? r.sharedSigmaDb.toFixed(2) : "--"}</td>
         <td>${r.nTrials}</td>
+        <td>${ceilTxt}</td>
         <td>${endsTxt}</td>
         <td>${flagHtml}</td>
       `;
       dom.resultsTbody.appendChild(tr);
     }
-  }
-
-  /* -------------------------------------------------------------------------
-   * File Exports (Spec Section 7): LM_PSE_*.csv, LM_TBT_*.csv, LM_SES_*.json
-   * ------------------------------------------------------------------------- */
-  function buildPseCsv(sess) {
-    const header = [
-      "participant_id",
-      "ear",
-      "date",
-      "block_pass",
-      "center_hz",
-      "bandwidth_oct",
-      "role",
-      "fixed_sound",
-      "varied_sound",
-      "fixed_level_spl",
-      "tone_equal_spl",
-      "varied_pse_spl",
-      "delta_db",
-      "se_db",
-      "shared_sigma_db",
-      "n_trials",
-      "upper_end_spl",
-      "lower_end_spl",
-      "flags",
-      "left_out_reason"
-    ];
-    const lines = [header.join(",")];
-    const rows = collectAllPseRows(sess);
-    for (const r of rows) {
-      const vals = [
-        sess.participantId,
-        sess.earCode,
-        sess.dateYmd,
-        r.blockPass,
-        r.centerHz,
-        r.bandwidthOct,
-        r.role,
-        r.fixedSound.label,
-        r.variedSound.label,
-        r.fixedLevelSpl.toFixed(1),
-        r.toneEqualSpl !== null ? r.toneEqualSpl.toFixed(3) : "",
-        r.variedPseSpl !== null ? r.variedPseSpl.toFixed(3) : "",
-        r.deltaDb !== null ? r.deltaDb.toFixed(3) : "",
-        r.seDb !== null ? r.seDb.toFixed(3) : "",
-        r.sharedSigmaDb !== null && Number.isFinite(r.sharedSigmaDb) ? r.sharedSigmaDb.toFixed(3) : "",
-        r.nTrials,
-        Number.isFinite(r.upperEndSpl) ? r.upperEndSpl.toFixed(3) : "",
-        Number.isFinite(r.lowerEndSpl) ? r.lowerEndSpl.toFixed(3) : "",
-        r.flags.join(";"),
-        r.leftOutReason
-      ];
-      lines.push(vals.map(csvEscape).join(","));
-    }
-    return lines.join("\n") + "\n";
-  }
-
-  function buildTbtCsv(sess) {
-    const header = [
-      "participant_id",
-      "ear",
-      "date",
-      "phase",
-      "block_pass",
-      "block_hz",
-      "match_id",
-      "role",
-      "track_id",
-      "track_slot",
-      "trial_in_block",
-      "trial_in_track",
-      "center_hz",
-      "bandwidth_oct",
-      "fixed_sound",
-      "varied_sound",
-      "fixed_level_spl",
-      "varied_level_spl",
-      "varied_interval",
-      "interval_1_sound",
-      "interval_1_spl",
-      "interval_2_sound",
-      "interval_2_spl",
-      "response_interval",
-      "varied_judged_louder",
-      "too_loud",
-      "rt_ms",
-      "ceiling_spl",
-      "guard_status"
-    ];
-    const lines = [header.join(",")];
-    for (const t of sess.tbtRows) {
-      const vals = [
-        sess.participantId,
-        sess.earCode,
-        sess.dateYmd,
-        t.phase,
-        t.blockPass,
-        t.blockHz,
-        t.matchId,
-        t.role,
-        t.trackId,
-        t.trackSlot,
-        t.trialInBlock,
-        t.trialInTrack,
-        t.centerHz,
-        t.bandwidthOct,
-        t.fixedSound,
-        t.variedSound,
-        Number(t.fixedLevelSpl).toFixed(2),
-        Number(t.variedLevelSpl).toFixed(2),
-        t.variedInterval,
-        t.interval1Sound,
-        Number(t.interval1Spl).toFixed(2),
-        t.interval2Sound,
-        Number(t.interval2Spl).toFixed(2),
-        t.responseInterval,
-        t.variedJudgedLouder,
-        t.tooLoud,
-        t.rtMs,
-        Number(t.ceilingSpl).toFixed(1),
-        t.guardStatus || "OK"
-      ];
-      lines.push(vals.map(csvEscape).join(","));
-    }
-    return lines.join("\n") + "\n";
-  }
-
-  function buildSesJson(sess) {
-    const pseRows = collectAllPseRows(sess).map((r) => ({
-      block_pass: r.blockPass,
-      center_hz: r.centerHz,
-      bandwidth_oct: r.bandwidthOct,
-      role: r.role,
-      fixed_sound: r.fixedSound.label,
-      varied_sound: r.variedSound.label,
-      fixed_level_spl: r.fixedLevelSpl,
-      tone_equal_spl: r.toneEqualSpl,
-      varied_pse_spl: r.variedPseSpl,
-      delta_db: r.deltaDb,
-      se_db: r.seDb,
-      shared_sigma_db: r.sharedSigmaDb,
-      n_trials: r.nTrials,
-      upper_end_spl: r.upperEndSpl,
-      lower_end_spl: r.lowerEndSpl,
-      flags: r.flags,
-      left_out_reason: r.leftOutReason
-    }));
-
-    const payload = {
-      app_name: "qLDM",
-      app_version: sess.appVersion,
-      exported_at_iso: new Date().toISOString(),
-      session_created_at_iso: sess.createdAtIso,
-      participant_id: sess.participantId,
-      ear: sess.ear,
-      ear_code: sess.earCode,
-      date_ymd: sess.dateYmd,
-      settings: sess.settings,
-      audio_path: {
-        requested_sample_rate_hz: sess.audioInfo?.requestedSampleRate || QLDM.DEFAULT_FS,
-        granted_sample_rate_hz: sess.audioInfo?.grantedSampleRate || QLDM.DEFAULT_FS,
-        monaural_channel_routing: sess.ear === "Left" ? "Channel 0 (Left) active; Channel 1 silent" : "Channel 1 (Right) active; Channel 0 silent",
-        recommended_os_output_format: "24-bit integer or 32-bit float at 48000 Hz, OS enhancements disabled",
-        output_devices_detected: sess.audioInfo?.outputDevices || []
-      },
-      stimulus_definition: {
-        reference_spl_db: QLDM.REF_SPL_DB,
-        reference_digital_rms_at_60db_spl: QLDM.REF_DIGITAL_RMS_60DB,
-        reference_dbfs_rms_at_60db_spl: -70.0,
-        component_spacing: "5 equal-amplitude geometric components f_c * 2^(m * bw_oct / 4), m in [-2, -1, 0, 1, 2], matching nea_gen_5tc.m",
-        component_start_phases_rad: [0, 0, 0, 0, 0],
-        component_start_phase_convention: "sine phase (0 rad at t = 0 onset)",
-        complexes_hz: {
-          "1000Hz_1oct": QLDM.getComplexComponentFreqs(1000, 1.0),
-          "4000Hz_1oct": QLDM.getComplexComponentFreqs(4000, 1.0),
-          "1000Hz_0.25oct": QLDM.getComplexComponentFreqs(1000, 0.25),
-          "4000Hz_0.25oct": QLDM.getComplexComponentFreqs(4000, 0.25)
-        },
-        duration_ms: sess.settings.durationMs,
-        raised_cosine_ramp_ms: sess.settings.rampMs,
-        inter_interval_gap_ms: sess.settings.gapMs,
-        post_response_iti_ms: sess.settings.itiMs
-      },
-      adaptive_and_estimator: {
-        rule: "1-up, 1-down two-track interleaved staircase (+10 dB upper, -10 dB lower; 4 dB step until first reversal, 2 dB thereafter)",
-        trials_per_track: sess.settings.trialsPerTrack,
-        varied_offset_bounds_db: [-QLDM.VARIED_OFFSET_LIM_DB, QLDM.VARIED_OFFSET_LIM_DB],
-        estimator: "Block maximum-likelihood logistic fit with shared slope sigma per frequency block and fixed lapse = 0.02",
-        se_note: "Curvature-based SE underestimates true match SD by ~25% at 16 trials/match; NEA inversion uses empirical pilot test-retest SD."
-      },
-      calibration: sess.calibration,
-      level_limits: {
-        initial_max_output_spl: sess.settings.initialMaxOutputSpl,
-        final_ceiling_spl: sess.ceilingSpl,
-        equipment_max_spl: QLDM.EQUIPMENT_MAX_SPL,
-        listener_limits: sess.settings.limits,
-        qcls_contour_file: sess.settings.qclsSourceFile || null,
-        too_loud_events: sess.tooLoudEvents
-      },
-      practice_summary: sess.practice,
-      pse_summary: pseRows
-    };
-
-    return JSON.stringify(payload, null, 2) + "\n";
   }
 
   function exportFilename(prefix, ext) {
@@ -1941,10 +1714,35 @@
       ev.target.value = "";
     });
 
-    /* Start / Resume / Discard / Load Completed */
-    dom.startSessionBtn.addEventListener("click", async () => {
-      await buildNewSessionFromSetup();
-      enterSessionFlow();
+    /* Begin Session -> Operator Analog Gain Confirmation Gate */
+    dom.startSessionBtn.addEventListener("click", () => {
+      openGainConfirmationModal(async (confirmRecord) => {
+        await buildNewSessionFromSetup(confirmRecord);
+        enterSessionFlow();
+      });
+    });
+
+    dom.gainConfirmChk.addEventListener("change", () => {
+      dom.gainConfirmOkBtn.disabled = !dom.gainConfirmChk.checked;
+    });
+
+    dom.gainConfirmCancelBtn.addEventListener("click", () => {
+      closeGainConfirmationModal();
+    });
+
+    dom.gainConfirmOkBtn.addEventListener("click", () => {
+      if (!dom.gainConfirmChk.checked) return;
+      const fsInfo = QLDM.computeFullScale1kSpl(calState);
+      const confirmRecord = {
+        confirmed: true,
+        confirmed_at_iso: new Date().toISOString(),
+        ref_dbfs_rms_at_60db_spl: fsInfo.refDbfsRms60,
+        analog_gain_above_qcls_db: fsInfo.gainAboveQclsDb,
+        full_scale_1khz_spl_db: fsInfo.fullScale1kSpl
+      };
+      const cb = gainModalCallback;
+      closeGainConfirmationModal();
+      if (typeof cb === "function") cb(confirmRecord);
     });
 
     dom.resumeSessionBtn.addEventListener("click", async () => {
@@ -2020,6 +1818,7 @@
     window.addEventListener("keydown", (ev) => {
       if (!awaitingResponse) return;
       if (
+        dom.gainConfirmModal.classList.contains("open") ||
         dom.instructionModal.classList.contains("open") ||
         dom.practiceCheckModal.classList.contains("open") ||
         dom.pauseModal.classList.contains("open") ||
@@ -2046,10 +1845,12 @@
       }
     });
 
-    dom.pauseRestartBtn.addEventListener("click", async () => {
+    dom.pauseRestartBtn.addEventListener("click", () => {
       closePauseModal();
-      await buildNewSessionFromSetup();
-      enterSessionFlow();
+      openGainConfirmationModal(async (confirmRecord) => {
+        await buildNewSessionFromSetup(confirmRecord);
+        enterSessionFlow();
+      });
     });
 
     dom.pauseReturnBtn.addEventListener("click", () => {
@@ -2059,15 +1860,15 @@
     /* Export Downloads */
     dom.dlPseBtn.addEventListener("click", () => {
       if (!session) return;
-      triggerDownload(buildPseCsv(session), exportFilename("LM_PSE", "csv"), "text/csv;charset=utf-8");
+      triggerDownload(QLDM.formatPseCsv(session), exportFilename("LM_PSE", "csv"), "text/csv;charset=utf-8");
     });
     dom.dlTbtBtn.addEventListener("click", () => {
       if (!session) return;
-      triggerDownload(buildTbtCsv(session), exportFilename("LM_TBT", "csv"), "text/csv;charset=utf-8");
+      triggerDownload(QLDM.formatTbtCsv(session), exportFilename("LM_TBT", "csv"), "text/csv;charset=utf-8");
     });
     dom.dlSesBtn.addEventListener("click", () => {
       if (!session) return;
-      triggerDownload(buildSesJson(session), exportFilename("LM_SES", "json"), "application/json;charset=utf-8");
+      triggerDownload(QLDM.formatSesJson(session), exportFilename("LM_SES", "json"), "application/json;charset=utf-8");
     });
 
     /* Coupler Calibration Modal */
@@ -2077,13 +1878,40 @@
 
     dom.calPresetSel.addEventListener("change", () => {
       if (!modalCalDraft) return;
-      const preset = cloneCalPreset(dom.calPresetSel.value);
+      const preset = cloneCalPreset(dom.calPresetSel.value, modalCalDraft.refDbfsRms60);
       modalCalDraft.id = preset.id;
       modalCalDraft.name = preset.name;
       modalCalDraft.couplerVerified = false;
       modalCalDraft.offsetsDb = { ...preset.offsetsDb };
       dom.calTransducerName.value = modalCalDraft.name;
+      renderModalFullScaleReadout();
       renderCalModalTable();
+      if (isCalPlaying) startCalibrationTone();
+    });
+
+    dom.calRefDbfs.addEventListener("input", () => {
+      if (!modalCalDraft) return;
+      const v = Number(dom.calRefDbfs.value);
+      if (Number.isFinite(v)) {
+        modalCalDraft.refDbfsRms60 = QLDM.clampRefDbfs60(v);
+        renderModalFullScaleReadout();
+        if (isCalPlaying) startCalibrationTone();
+      }
+    });
+    dom.calRefDbfs.addEventListener("change", () => {
+      if (!modalCalDraft) return;
+      modalCalDraft.refDbfsRms60 = QLDM.clampRefDbfs60(dom.calRefDbfs.value);
+      dom.calRefDbfs.value = modalCalDraft.refDbfsRms60.toFixed(1);
+      renderModalFullScaleReadout();
+      if (isCalPlaying) startCalibrationTone();
+    });
+
+    dom.calLvl30Btn.addEventListener("click", () => {
+      dom.calToneSpl.value = "30";
+      if (isCalPlaying) startCalibrationTone();
+    });
+    dom.calLvl80Btn.addEventListener("click", () => {
+      dom.calToneSpl.value = "80";
       if (isCalPlaying) startCalibrationTone();
     });
 
@@ -2111,6 +1939,16 @@
 
     dom.calSaveBtn.addEventListener("click", () => {
       if (!modalCalDraft) return;
+      const missingFreqs = QLDM.CALIBRATION_FREQS.filter(
+        (f) => !Number.isFinite(QLDM.lookupCalOffsetDb(modalCalDraft, f))
+      );
+      if (missingFreqs.length > 0) {
+        dom.calSaveErr.style.display = "block";
+        dom.calSaveErr.textContent =
+          `Cannot save: missing calibration offset for ${missingFreqs.map((f) => f.toFixed(2) + " Hz").join(", ")}.`;
+        return;
+      }
+      modalCalDraft.refDbfsRms60 = QLDM.clampRefDbfs60(dom.calRefDbfs.value);
       modalCalDraft.name = dom.calTransducerName.value.trim() || "Custom Transducer";
       modalCalDraft.date = dom.calDateInput.value || todayIsoDate();
       modalCalDraft.couplerVerified = true;

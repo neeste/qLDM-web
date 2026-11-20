@@ -12,25 +12,58 @@
 (function (global) {
   "use strict";
 
-  const APP_VERSION = "1.0.0";
+  const APP_VERSION = "1.1.0";
   const DEFAULT_FS = 48000;
 
   /*
-   * Digital reference level:
-   * -70 dBFS RMS (0.000316227766) corresponds to 60.0 dB SPL for a 0-dB-offset
-   * calibrated component. This is 30 dB lower than qCLS's 0.01 (-40 dBFS) reference,
-   * giving >20 dB of clean digital headroom above a 100 dB SPL 5-tone complex
-   * (crest factor ~3.15 = 10 dB) even with ~15 dB of high-frequency insert-phone
-   * roll-off compensation at 5657 Hz, while preserving ~60 dB of SNR above the
-   * 24-bit quantization floor for a 30 dB SPL pure tone.
+   * Digital reference level (configurable in calibration from -70 to -50 dBFS):
+   * Default -60.0 dBFS RMS (0.001000) corresponds to 60.0 dB SPL for a 0-dB-offset
+   * calibrated component (20 dB lower digital reference / +20 dB higher analog gain
+   * than qCLS's -40 dBFS = 0.01 reference):
+   *   - At -60 dBFS: a full-scale (0 dBFS peak) 1-kHz tone is nominally 116.9 dB SPL,
+   *     the nominal ER-3A table leaves a 102.3 dB SPL unclipped ceiling across the
+   *     entire stimulus set, and a 30 dB SPL tone (-90 dBFS RMS) has a peak of 1.5
+   *     16-bit steps and sits 56-59 dB above the ideal 24-bit quantization floor.
+   *   - At -70 dBFS: full-scale 1-kHz tone is 126.9 dB SPL (+30 dB gain re qCLS),
+   *     and a 30 dB SPL tone (-100 dBFS RMS) has a peak of 0.46 of one 16-bit step
+   *     and sits 46-49 dB above the 24-bit quantization floor.
+   *   A 24-bit (or 32-bit float) OS output path is required across the full range.
    */
   const REF_SPL_DB = 60.0;
-  const REF_DIGITAL_RMS_60DB = Math.pow(10.0, -70.0 / 20.0); // 0.00031622776601683794
+  const DEFAULT_REF_DBFS_60DB = -60.0;
+  const MIN_REF_DBFS_60DB = -70.0;
+  const MAX_REF_DBFS_60DB = -50.0;
+  const QCLS_REF_DBFS_60DB = -40.0;
+  const REF_DIGITAL_RMS_60DB = Math.pow(10.0, DEFAULT_REF_DBFS_60DB / 20.0); // 0.001
   const LOGISTIC_K = Math.PI / Math.sqrt(3.0);               // sigma = K * s
   const FIXED_LAPSE = 0.02;
   const VARIED_OFFSET_LIM_DB = 20.0;
   const EQUIPMENT_MAX_SPL = 110.0;
   const MIN_VARIED_SPL = 10.0;
+
+  function clampRefDbfs60(dbfs) {
+    const v = Number(dbfs);
+    if (!Number.isFinite(v)) return DEFAULT_REF_DBFS_60DB;
+    return Math.max(MIN_REF_DBFS_60DB, Math.min(MAX_REF_DBFS_60DB, v));
+  }
+
+  function resolveRefDbfs60(calTable, explicitRefDbfs) {
+    if (explicitRefDbfs !== undefined && explicitRefDbfs !== null && Number.isFinite(Number(explicitRefDbfs))) {
+      return clampRefDbfs60(explicitRefDbfs);
+    }
+    if (calTable && Number.isFinite(Number(calTable.refDbfsRms60))) {
+      return clampRefDbfs60(calTable.refDbfsRms60);
+    }
+    return DEFAULT_REF_DBFS_60DB;
+  }
+
+  function resolveRefDigitalRms60(calTable, explicitRefRms60) {
+    if (explicitRefRms60 !== undefined && explicitRefRms60 !== null && Number(explicitRefRms60) > 0 && Number.isFinite(Number(explicitRefRms60))) {
+      return Number(explicitRefRms60);
+    }
+    const dbfs = resolveRefDbfs60(calTable, null);
+    return Math.pow(10.0, dbfs / 20.0);
+  }
 
   /*
    * Canonical 18 component frequencies required across Standard (1-octave) and
@@ -76,6 +109,7 @@
       name: "Etymotic ER-3A Insert (Nominal Starting Curve — Verify on Local Coupler)",
       couplerVerified: false,
       date: "UnverifiedPreset",
+      refDbfsRms60: DEFAULT_REF_DBFS_60DB,
       offsetsDb: {
         "707.1068": -0.4,
         "840.8964": -0.2,
@@ -102,16 +136,23 @@
       name: "Flat 0-dB Reference (Ideal / Loopback Verification)",
       couplerVerified: false,
       date: "Reference",
+      refDbfsRms60: DEFAULT_REF_DBFS_60DB,
       offsetsDb: Object.fromEntries(CALIBRATION_FREQS.map(f => [String(f), 0.0]))
     }
   };
 
+  /*
+   * Strict component calibration lookup:
+   * Returns NaN if no table entry is within 2 Hz or if the value is missing/non-finite,
+   * so an uncalibrated component is refused rather than silently treated as 0 dB.
+   */
   function lookupCalOffsetDb(calTable, freqHz) {
-    if (!calTable || !calTable.offsetsDb) return 0.0;
+    if (!calTable || !calTable.offsetsDb) return NaN;
     let bestKey = null;
     let bestDiff = Infinity;
     for (const k of Object.keys(calTable.offsetsDb)) {
       const fk = Number(k);
+      if (!Number.isFinite(fk)) continue;
       const d = Math.abs(fk - freqHz);
       if (d < bestDiff) {
         bestDiff = d;
@@ -119,10 +160,32 @@
       }
     }
     if (bestKey !== null && bestDiff < 2.0) {
-      const v = Number(calTable.offsetsDb[bestKey]);
-      return Number.isFinite(v) ? v : 0.0;
+      const raw = calTable.offsetsDb[bestKey];
+      if (raw === null || raw === undefined || raw === "") return NaN;
+      const v = Number(raw);
+      return Number.isFinite(v) ? v : NaN;
     }
-    return 0.0;
+    return NaN;
+  }
+
+  /*
+   * Nominal SPL of a full-scale (0 dBFS peak = -3.0103 dBFS RMS) 1-kHz pure tone
+   * under the active digital reference and 1-kHz calibration offset, plus the
+   * analog hardware gain difference relative to qCLS (-40 dBFS RMS @ 60 dB SPL).
+   */
+  function computeFullScale1kSpl(calTable, explicitRefDbfs) {
+    const refDbfs = resolveRefDbfs60(calTable, explicitRefDbfs);
+    const off1k = lookupCalOffsetDb(calTable, 1000.0);
+    const offsetUsed = Number.isFinite(off1k) ? off1k : 0.0;
+    const exactSpl = REF_SPL_DB - refDbfs - 20.0 * Math.log10(Math.SQRT2) + offsetUsed;
+    return {
+      refDbfsRms60: refDbfs,
+      refDigitalRms60: Math.pow(10.0, refDbfs / 20.0),
+      gainAboveQclsDb: QCLS_REF_DBFS_60DB - refDbfs,
+      fullScale1kSpl: Number((Math.floor(exactSpl * 10) / 10).toFixed(1)),
+      exactFullScale1kSpl: exactSpl,
+      hasValid1kCal: Number.isFinite(off1k)
+    };
   }
 
   /* -------------------------------------------------------------------------
@@ -218,7 +281,7 @@
     const durationMs = Number(params.durationMs ?? 500);
     const rampMs = Number(params.rampMs ?? 20);
     const calTable = params.calTable || TRANSDUCER_PRESETS.flat_ref;
-    const refRms60 = Number(params.refDigitalRms60 ?? REF_DIGITAL_RMS_60DB);
+    const refRms60 = resolveRefDigitalRms60(calTable, params.refDigitalRms60);
 
     if (!Number.isFinite(centerHz) || !Number.isFinite(levelSpl) || !(fs > 0) || !(durationMs > 0)) {
       return { ok: false, reason: "INVALID_NUMERIC_PARAM", samples: new Float64Array(0), peak: NaN, acousticSpl: NaN };
@@ -231,6 +294,23 @@
       : [centerHz];
     const nComp = compFreqs.length;
 
+    /* Refuse immediately if any component lacks a valid calibration table entry */
+    const calOffsetsDb = [];
+    for (const f of compFreqs) {
+      const offDb = lookupCalOffsetDb(calTable, f);
+      if (!Number.isFinite(offDb)) {
+        return {
+          ok: false,
+          reason: "MISSING_CALIBRATION_ENTRY",
+          missingFreqHz: f,
+          samples: new Float64Array(0),
+          peak: NaN,
+          acousticSpl: NaN
+        };
+      }
+      calOffsetsDb.push(offDb);
+    }
+
     /*
      * Step 1: Synthesize unweighted sine-phase components and compute the exact
      * finite-duration cross-correlation factor rho of the uncalibrated unit-RMS
@@ -239,7 +319,7 @@
      * quarter-octave beats at 500 ms.
      */
     const rawUnweighted = new Float64Array(nSamples);
-    const calLinGains = compFreqs.map(f => Math.pow(10.0, -lookupCalOffsetDb(calTable, f) / 20.0));
+    const calLinGains = calOffsetsDb.map(offDb => Math.pow(10.0, -offDb / 20.0));
     const calWeightedSum = new Float64Array(nSamples);
 
     let sumSqUnweighted = 0.0;
@@ -345,9 +425,15 @@
     const i0 = Math.min(nRamp, Math.floor(n / 4));
     const i1 = Math.max(i0 + 1, n - i0);
     const nMid = i1 - i0;
-    const refRms60 = Number(opts.refDigitalRms60 ?? REF_DIGITAL_RMS_60DB);
     const calTable = opts.calTable || TRANSDUCER_PRESETS.flat_ref;
+    const refRms60 = resolveRefDigitalRms60(calTable, opts.refDigitalRms60);
     const compFreqs = opts.compFreqs || [];
+
+    for (const f of compFreqs) {
+      if (!Number.isFinite(lookupCalOffsetDb(calTable, f))) {
+        return { ok: false, reason: "MISSING_CALIBRATION_ENTRY", missingFreqHz: f, peak, estimatedSpl: NaN };
+      }
+    }
 
     let totalDigitalPwr = 0.0;
     for (let i = i0; i < i1; i++) totalDigitalPwr += samples[i] * samples[i];
@@ -396,7 +482,7 @@
     const durationMs = Number(opts.durationMs ?? 500);
     const rampMs = Number(opts.rampMs ?? 20);
     const fs = Number(opts.sampleRate || DEFAULT_FS);
-    const refRms60 = Number(opts.refDigitalRms60 ?? REF_DIGITAL_RMS_60DB);
+    const refRms60 = resolveRefDigitalRms60(calTable, opts.refDigitalRms60);
 
     const specs = [
       { label: "1 kHz Pure Tone", centerHz: 1000, sound: SOUND_TONE },
@@ -419,12 +505,27 @@
         refDigitalRms60: refRms60,
         ceilingSpl: 200.0
       });
+      if (!refWave.ok) {
+        return {
+          label: sp.label,
+          centerHz: sp.centerHz,
+          bwOct: sp.sound.bwOct,
+          kind: sp.sound.kind,
+          ok: false,
+          reason: refWave.reason,
+          peakAt60dB: NaN,
+          crestFactor: NaN,
+          maxUnclippedSpl: NaN
+        };
+      }
       const maxSplBeforeClip = 60.0 + 20.0 * Math.log10(1.0 / refWave.peak);
       return {
         label: sp.label,
         centerHz: sp.centerHz,
         bwOct: sp.sound.bwOct,
         kind: sp.sound.kind,
+        ok: true,
+        reason: "OK",
         peakAt60dB: refWave.peak,
         crestFactor: Number(refWave.crestFactorRaw.toFixed(3)),
         maxUnclippedSpl: Number((Math.floor(maxSplBeforeClip * 10) / 10).toFixed(1))
@@ -525,6 +626,7 @@
       variedOffsetsDb: [],
       variedLevelsSpl: [],
       variedJudgedLouder: [],
+      hitCeilingFlags: [],
       hitLimitFlags: []
     };
   }
@@ -532,16 +634,23 @@
   function stepTrack(track, variedWasJudgedLouder, ceilingSpl) {
     const effCeil = Math.min(Number(ceilingSpl ?? 100.0), EQUIPMENT_MAX_SPL);
     const minSpl = Math.max(MIN_VARIED_SPL, track.fixedLevelSpl - VARIED_OFFSET_LIM_DB);
-    const maxSpl = Math.min(effCeil, track.fixedLevelSpl + VARIED_OFFSET_LIM_DB);
+    const rangeMaxSpl = track.fixedLevelSpl + VARIED_OFFSET_LIM_DB;
+    const maxSpl = Math.min(effCeil, rangeMaxSpl);
 
     const usedSpl = track.curVariedSpl;
     const usedOffset = usedSpl - track.fixedLevelSpl;
-    const atLimit = (usedSpl <= minSpl + 1e-9) || (usedSpl >= maxSpl - 1e-9);
+    /* Separate ceiling cap (Max Output or "Too loud"-lowered ceiling) from +/-20 dB range & 10 dB floor */
+    const atCeiling = usedSpl >= effCeil - 1e-9;
+    const atRangeOrFloor = !atCeiling && ((usedSpl <= minSpl + 1e-9) || (usedSpl >= rangeMaxSpl - 1e-9));
+
+    if (!Array.isArray(track.hitCeilingFlags)) track.hitCeilingFlags = [];
+    if (!Array.isArray(track.hitLimitFlags)) track.hitLimitFlags = [];
 
     track.variedLevelsSpl.push(usedSpl);
     track.variedOffsetsDb.push(usedOffset);
     track.variedJudgedLouder.push(Boolean(variedWasJudgedLouder));
-    track.hitLimitFlags.push(atLimit);
+    track.hitCeilingFlags.push(atCeiling);
+    track.hitLimitFlags.push(atRangeOrFloor);
     track.trialsCompleted += 1;
 
     /* One-up, one-down: varied goes down (-1) after "varied louder", up (+1) after "fixed louder" */
@@ -932,11 +1041,28 @@
       fitMap.set(mIdx, { mu: fit.midpoints[k], se: fit.ses[k] });
     });
 
+    const countCeilingStats = pair => {
+      let nAtCeiling = 0;
+      let nAtCeilingFixedLouder = 0;
+      for (const tr of [pair?.upper, pair?.lower]) {
+        if (!tr || !Array.isArray(tr.hitCeilingFlags)) continue;
+        for (let i = 0; i < tr.hitCeilingFlags.length; i++) {
+          if (tr.hitCeilingFlags[i]) {
+            nAtCeiling += 1;
+            if (!tr.variedJudgedLouder[i]) nAtCeilingFixedLouder += 1;
+          }
+        }
+      }
+      return { nAtCeiling, nAtCeilingFixedLouder };
+    };
+
     const rows = blockMatches.map((m, idx) => {
       if (m.excludedReason) {
         return {
           ...m,
           nTrials: 0,
+          nAtCeiling: 0,
+          nAtCeilingFixedLouder: 0,
           variedPseSpl: null,
           toneEqualSpl: null,
           deltaDb: null,
@@ -953,12 +1079,15 @@
       const uLvls = pair.upper.variedLevelsSpl;
       const lLvls = pair.lower.variedLevelsSpl;
       const nTrials = uLvls.length + lLvls.length;
+      const { nAtCeiling, nAtCeilingFixedLouder } = countCeilingStats(pair);
       const fRes = fitMap.get(idx);
 
       if (!fRes) {
         return {
           ...m,
           nTrials,
+          nAtCeiling,
+          nAtCeilingFixedLouder,
           variedPseSpl: null,
           toneEqualSpl: null,
           deltaDb: null,
@@ -978,6 +1107,7 @@
         return sub.reduce((a, b) => a + b, 0) / sub.length;
       };
       const has3Consec = boolArr => {
+        if (!Array.isArray(boolArr)) return false;
         for (let i = 0; i + 2 < boolArr.length; i++) {
           if (boolArr[i] && boolArr[i + 1] && boolArr[i + 2]) return true;
         }
@@ -989,6 +1119,9 @@
       const flags = [];
       if (Number.isFinite(upperEndSpl) && Number.isFinite(lowerEndSpl) && Math.abs(upperEndSpl - lowerEndSpl) > 6.0) {
         flags.push("TRACKS_APART_GT_6DB");
+      }
+      if (has3Consec(pair.upper.hitCeilingFlags) || has3Consec(pair.lower.hitCeilingFlags)) {
+        flags.push("AT_CEILING");
       }
       if (has3Consec(pair.upper.hitLimitFlags) || has3Consec(pair.lower.hitLimitFlags)) {
         flags.push("AT_LIMIT_3_CONSEC");
@@ -1015,6 +1148,8 @@
       return {
         ...m,
         nTrials,
+        nAtCeiling,
+        nAtCeilingFixedLouder,
         muVariedMinusFixedDb: fRes.mu,
         variedPseSpl,
         toneEqualSpl,
@@ -1028,15 +1163,24 @@
       };
     });
 
-    /* Component-listening check (Advice Section 7 & 8):
-     * Flag if every completed forward match in the block has Delta <= -6 dB. */
-    const forwardCompleted = rows.filter(r => r.role === "forward" && r.deltaDb !== null && r.nTrials >= 8);
+    /* Component-listening check (Follow-up Section 3):
+     * Evaluate ONLY over completed forward 1-octave matches in the block (at least 2 completed),
+     * since quarter-octave complexes do not produce -7 dB single-component matches, and mark only those. */
+    const forwardOneOctCompleted = rows.filter(
+      r =>
+        r.role === "forward" &&
+        r.fixedSound &&
+        r.fixedSound.kind === "complex" &&
+        Math.abs(Number(r.fixedSound.bwOct) - 1.0) < 1e-6 &&
+        r.deltaDb !== null &&
+        r.nTrials >= 8
+    );
     const componentMatchFlag =
-      forwardCompleted.length >= 2 &&
-      forwardCompleted.every(r => r.deltaDb <= compFlagThresholdDb);
+      forwardOneOctCompleted.length >= 2 &&
+      forwardOneOctCompleted.every(r => r.deltaDb <= compFlagThresholdDb);
 
     if (componentMatchFlag) {
-      for (const r of forwardCompleted) {
+      for (const r of forwardOneOctCompleted) {
         if (!r.flags.includes("COMPONENT_MATCH_SUSPECTED")) {
           r.flags.push("COMPONENT_MATCH_SUSPECTED");
         }
@@ -1060,6 +1204,7 @@
     const trueSigma = Number(params.sigma ?? 4.0);
     const startDb = Number(params.startOffsetDb ?? 10.0);
     const trueLapse = Number(params.lapse ?? 0.02);
+    const ceilingSpl = Number(params.ceilingSpl ?? 130);
     const sTrue = trueSigma / LOGISTIC_K;
 
     const trueDeltas = params.trueDeltas || Array.from({ length: M }, () => -8.0 + 10.0 * rng.next());
@@ -1074,8 +1219,8 @@
     }));
 
     const pairs = matches.map(m => ({
-      upper: createTrackState(m, "upper", { startOffsetDb: startDb, trialsPerTrack: nPerTrack, ceilingSpl: 130 }),
-      lower: createTrackState(m, "lower", { startOffsetDb: startDb, trialsPerTrack: nPerTrack, ceilingSpl: 130 })
+      upper: createTrackState(m, "upper", { startOffsetDb: startDb, trialsPerTrack: nPerTrack, ceilingSpl }),
+      lower: createTrackState(m, "lower", { startOffsetDb: startDb, trialsPerTrack: nPerTrack, ceilingSpl })
     }));
 
     /* Randomly interleave all unfinished tracks in the block (Spec Section 5) */
@@ -1090,17 +1235,375 @@
       const x = pick.curVariedSpl - pick.fixedLevelSpl;
       const pToneLouder = trueLapse / 2.0 + (1.0 - trueLapse) * expit((x - trueDeltas[mIdx]) / sTrue);
       const resp = rng.next() < pToneLouder;
-      stepTrack(pick, resp, 130);
+      stepTrack(pick, resp, ceilingSpl);
     }
 
     const evalRes = evaluateBlockMatches(matches, pairs, { componentFlagThresholdDb: -999 });
     return { trueDeltas, evalRes };
   }
 
+  /* -------------------------------------------------------------------------
+   * Pure Session Mutation & File Export Formatters (Shared by Browser & Tests)
+   * ------------------------------------------------------------------------- */
+  function csvEscape(val) {
+    if (val === null || val === undefined) return "";
+    const s = String(val);
+    if (/[",\n\r]/.test(s)) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  }
+
+  /*
+   * Apply a "Too loud" event to a session object (Spec Section 6):
+   * Lowers ceilingSpl by 5 dB for the rest of the session, ends every track whose
+   * fixed level exceeds the new ceiling, clamps active tracks, and logs the event.
+   */
+  function applyTooLoudToSession(sess, presentation = null, timestampIso = null) {
+    const oldCeiling = Number(sess.ceilingSpl ?? 100.0);
+    const newCeiling = Math.max(MIN_VARIED_SPL + 15.0, oldCeiling - 5.0);
+    sess.ceilingSpl = newCeiling;
+
+    if (Array.isArray(sess.blocks)) {
+      for (const blk of sess.blocks) {
+        blk.matches.forEach((m, idx) => {
+          const pair = blk.pairs[idx];
+          if (!pair || (!pair.upper && !pair.lower)) return;
+          const hadTrials =
+            (pair.upper ? pair.upper.trialsCompleted : 0) +
+            (pair.lower ? pair.lower.trialsCompleted : 0);
+          if (m.fixedLevelSpl > newCeiling + 1e-9 && hadTrials === 0 && !m.excludedReason) {
+            m.excludedReason = `TOO_LOUD_CEILING (${newCeiling.toFixed(1)})`;
+          }
+          if (pair.upper) applyCeilingChangeToTrack(pair.upper, newCeiling);
+          if (pair.lower) applyCeilingChangeToTrack(pair.lower, newCeiling);
+        });
+      }
+    }
+
+    if (!Array.isArray(sess.tooLoudEvents)) sess.tooLoudEvents = [];
+    sess.tooLoudEvents.push({
+      timestampIso: timestampIso || new Date().toISOString(),
+      phase: sess.phase || "block",
+      blockPass: presentation ? presentation.blockPass : null,
+      blockHz: presentation ? presentation.blockHz : null,
+      matchId: presentation ? presentation.matchId : null,
+      trackId: presentation ? presentation.trackId : null,
+      fixedLevelSpl: presentation ? presentation.fixedLevelSpl : null,
+      variedLevelSpl: presentation ? presentation.variedLevelSpl : null,
+      oldCeilingSpl: oldCeiling,
+      newCeilingSpl: newCeiling
+    });
+
+    if (presentation) {
+      if (!Array.isArray(sess.tbtRows)) sess.tbtRows = [];
+      const blk = sess.blocks && sess.blocks[sess.activeBlockArrayIndex];
+      sess.tbtRows.push({
+        phase: presentation.isPractice ? "practice" : "block",
+        blockPass: presentation.blockPass,
+        blockHz: presentation.blockHz,
+        matchId: presentation.matchId,
+        role: presentation.role,
+        trackId: presentation.trackId,
+        trackSlot: presentation.trackSlot,
+        trialInBlock: presentation.isPractice
+          ? (sess.practice ? sess.practice.trialIndex + 1 : 1)
+          : (blk ? blk.trialsInBlockCompleted + 1 : 1),
+        trialInTrack: presentation.isPractice
+          ? (sess.practice ? sess.practice.trialIndex + 1 : 1)
+          : (presentation.trackRef ? presentation.trackRef.trialsCompleted + 1 : 0),
+        centerHz: presentation.centerHz,
+        bandwidthOct: presentation.bandwidthOct,
+        fixedSound: presentation.fixedSound.label,
+        variedSound: presentation.variedSound.label,
+        fixedLevelSpl: presentation.fixedLevelSpl,
+        variedLevelSpl: presentation.variedLevelSpl,
+        variedInterval: presentation.variedInterval,
+        interval1Sound: presentation.sound1.label,
+        interval1Spl: presentation.level1Spl,
+        interval2Sound: presentation.sound2.label,
+        interval2Spl: presentation.level2Spl,
+        responseInterval: "TOO_LOUD",
+        variedJudgedLouder: "",
+        tooLoud: 1,
+        rtMs: "",
+        ceilingSpl: newCeiling,
+        guardStatus: "TOO_LOUD_PRESSED"
+      });
+      if (!presentation.isPractice && presentation.trackRef && !presentation.trackRef.finished) {
+        applyCeilingChangeToTrack(presentation.trackRef, newCeiling);
+      }
+    }
+
+    return { oldCeiling, newCeiling };
+  }
+
+  function collectSessionPseRows(sess) {
+    const out = [];
+    const compThresh = Number(sess.settings?.compFlagDb ?? -6.0);
+    for (const blk of (sess.blocks || [])) {
+      const ev = blk.evalSummary || evaluateBlockMatches(blk.matches, blk.pairs, {
+        componentFlagThresholdDb: compThresh
+      });
+      for (const r of ev.rows) {
+        const bwOct =
+          r.fixedSound.kind === "complex"
+            ? r.fixedSound.bwOct
+            : r.variedSound.kind === "complex"
+              ? r.variedSound.bwOct
+              : 0.0;
+        out.push({
+          blockPass: blk.blockPass,
+          centerHz: r.centerHz,
+          bandwidthOct: bwOct,
+          role: r.role,
+          fixedSound: r.fixedSound,
+          variedSound: r.variedSound,
+          fixedLevelSpl: r.fixedLevelSpl,
+          toneEqualSpl: r.toneEqualSpl,
+          variedPseSpl: r.variedPseSpl,
+          deltaDb: r.deltaDb,
+          seDb: r.seDb,
+          sharedSigmaDb: r.sharedSigmaDb,
+          nTrials: r.nTrials,
+          nAtCeiling: r.nAtCeiling ?? 0,
+          nAtCeilingFixedLouder: r.nAtCeilingFixedLouder ?? 0,
+          upperEndSpl: r.upperEndSpl,
+          lowerEndSpl: r.lowerEndSpl,
+          flags: r.flags || [],
+          leftOutReason: r.leftOutReason || ""
+        });
+      }
+    }
+    return out;
+  }
+
+  function formatPseCsv(sess) {
+    const header = [
+      "participant_id",
+      "ear",
+      "date",
+      "block_pass",
+      "center_hz",
+      "bandwidth_oct",
+      "role",
+      "fixed_sound",
+      "varied_sound",
+      "fixed_level_spl",
+      "tone_equal_spl",
+      "varied_pse_spl",
+      "delta_db",
+      "se_db",
+      "shared_sigma_db",
+      "n_trials",
+      "n_at_ceiling",
+      "n_at_ceiling_fixed_louder",
+      "upper_end_spl",
+      "lower_end_spl",
+      "flags",
+      "left_out_reason"
+    ];
+    const lines = [header.join(",")];
+    const rows = collectSessionPseRows(sess);
+    for (const r of rows) {
+      const vals = [
+        sess.participantId,
+        sess.earCode,
+        sess.dateYmd,
+        r.blockPass,
+        r.centerHz,
+        r.bandwidthOct,
+        r.role,
+        r.fixedSound.label,
+        r.variedSound.label,
+        r.fixedLevelSpl.toFixed(1),
+        r.toneEqualSpl !== null ? r.toneEqualSpl.toFixed(3) : "",
+        r.variedPseSpl !== null ? r.variedPseSpl.toFixed(3) : "",
+        r.deltaDb !== null ? r.deltaDb.toFixed(3) : "",
+        r.seDb !== null ? r.seDb.toFixed(3) : "",
+        r.sharedSigmaDb !== null && Number.isFinite(r.sharedSigmaDb) ? r.sharedSigmaDb.toFixed(3) : "",
+        r.nTrials,
+        r.nAtCeiling,
+        r.nAtCeilingFixedLouder,
+        Number.isFinite(r.upperEndSpl) ? r.upperEndSpl.toFixed(3) : "",
+        Number.isFinite(r.lowerEndSpl) ? r.lowerEndSpl.toFixed(3) : "",
+        r.flags.join(";"),
+        r.leftOutReason
+      ];
+      lines.push(vals.map(csvEscape).join(","));
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function formatTbtCsv(sess) {
+    const header = [
+      "participant_id",
+      "ear",
+      "date",
+      "phase",
+      "block_pass",
+      "block_hz",
+      "match_id",
+      "role",
+      "track_id",
+      "track_slot",
+      "trial_in_block",
+      "trial_in_track",
+      "center_hz",
+      "bandwidth_oct",
+      "fixed_sound",
+      "varied_sound",
+      "fixed_level_spl",
+      "varied_level_spl",
+      "varied_interval",
+      "interval_1_sound",
+      "interval_1_spl",
+      "interval_2_sound",
+      "interval_2_spl",
+      "response_interval",
+      "varied_judged_louder",
+      "too_loud",
+      "rt_ms",
+      "ceiling_spl",
+      "guard_status"
+    ];
+    const lines = [header.join(",")];
+    for (const t of (sess.tbtRows || [])) {
+      const vals = [
+        sess.participantId,
+        sess.earCode,
+        sess.dateYmd,
+        t.phase,
+        t.blockPass,
+        t.blockHz,
+        t.matchId,
+        t.role,
+        t.trackId,
+        t.trackSlot,
+        t.trialInBlock,
+        t.trialInTrack,
+        t.centerHz,
+        t.bandwidthOct,
+        t.fixedSound,
+        t.variedSound,
+        Number(t.fixedLevelSpl).toFixed(2),
+        Number(t.variedLevelSpl).toFixed(2),
+        t.variedInterval,
+        t.interval1Sound,
+        Number(t.interval1Spl).toFixed(2),
+        t.interval2Sound,
+        Number(t.interval2Spl).toFixed(2),
+        t.responseInterval,
+        t.variedJudgedLouder,
+        t.tooLoud,
+        t.rtMs,
+        Number(t.ceilingSpl).toFixed(1),
+        t.guardStatus || "OK"
+      ];
+      lines.push(vals.map(csvEscape).join(","));
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function formatSesJson(sess, exportedAtIso = null) {
+    const fsInfo = computeFullScale1kSpl(sess.calibration);
+    const pseRows = collectSessionPseRows(sess).map((r) => ({
+      block_pass: r.blockPass,
+      center_hz: r.centerHz,
+      bandwidth_oct: r.bandwidthOct,
+      role: r.role,
+      fixed_sound: r.fixedSound.label,
+      varied_sound: r.variedSound.label,
+      fixed_level_spl: r.fixedLevelSpl,
+      tone_equal_spl: r.toneEqualSpl,
+      varied_pse_spl: r.variedPseSpl,
+      delta_db: r.deltaDb,
+      se_db: r.seDb,
+      shared_sigma_db: r.sharedSigmaDb,
+      n_trials: r.nTrials,
+      n_at_ceiling: r.nAtCeiling,
+      n_at_ceiling_fixed_louder: r.nAtCeilingFixedLouder,
+      upper_end_spl: r.upperEndSpl,
+      lower_end_spl: r.lowerEndSpl,
+      flags: r.flags,
+      left_out_reason: r.leftOutReason
+    }));
+
+    const payload = {
+      app_name: "qLDM",
+      app_version: sess.appVersion || APP_VERSION,
+      exported_at_iso: exportedAtIso || new Date().toISOString(),
+      session_created_at_iso: sess.createdAtIso,
+      participant_id: sess.participantId,
+      ear: sess.ear,
+      ear_code: sess.earCode,
+      date_ymd: sess.dateYmd,
+      settings: sess.settings,
+      analog_gain_confirmation: sess.analogGainConfirmation || null,
+      audio_path: {
+        requested_sample_rate_hz: sess.audioInfo?.requestedSampleRate || DEFAULT_FS,
+        granted_sample_rate_hz: sess.audioInfo?.grantedSampleRate || DEFAULT_FS,
+        monaural_channel_routing: sess.ear === "Left" ? "Channel 0 (Left) active; Channel 1 silent" : "Channel 1 (Right) active; Channel 0 silent",
+        recommended_os_output_format: "24-bit integer or 32-bit float at 48000 Hz, OS enhancements disabled",
+        output_devices_detected: sess.audioInfo?.outputDevices || []
+      },
+      stimulus_definition: {
+        reference_spl_db: REF_SPL_DB,
+        reference_dbfs_rms_at_60db_spl: fsInfo.refDbfsRms60,
+        reference_digital_rms_at_60db_spl: fsInfo.refDigitalRms60,
+        nominal_full_scale_1khz_spl_db: fsInfo.fullScale1kSpl,
+        analog_gain_above_qcls_db: fsInfo.gainAboveQclsDb,
+        component_spacing: "5 equal-amplitude geometric components f_c * 2^(m * bw_oct / 4), m in [-2, -1, 0, 1, 2], matching nea_gen_5tc.m",
+        component_start_phases_rad: [0, 0, 0, 0, 0],
+        component_start_phase_convention: "sine phase (0 rad at t = 0 onset)",
+        complexes_hz: {
+          "1000Hz_1oct": getComplexComponentFreqs(1000, 1.0),
+          "4000Hz_1oct": getComplexComponentFreqs(4000, 1.0),
+          "1000Hz_0.25oct": getComplexComponentFreqs(1000, 0.25),
+          "4000Hz_0.25oct": getComplexComponentFreqs(4000, 0.25)
+        },
+        duration_ms: sess.settings?.durationMs ?? 500,
+        raised_cosine_ramp_ms: sess.settings?.rampMs ?? 20,
+        inter_interval_gap_ms: sess.settings?.gapMs ?? 400,
+        post_response_iti_ms: sess.settings?.itiMs ?? 300
+      },
+      adaptive_and_estimator: {
+        rule: "1-up, 1-down two-track interleaved staircase (+10 dB upper, -10 dB lower; 4 dB step until first reversal, 2 dB thereafter)",
+        trials_per_track: sess.settings?.trialsPerTrack ?? 8,
+        varied_offset_bounds_db: [-VARIED_OFFSET_LIM_DB, VARIED_OFFSET_LIM_DB],
+        estimator: "Block maximum-likelihood logistic fit with shared slope sigma per frequency block and fixed lapse = 0.02",
+        ceiling_flags_and_bounds: "AT_CEILING marks >=3 consecutive trials at ceilingSpl (separate from AT_LIMIT_3_CONSEC for +/-20 dB range/floor); n_at_ceiling and n_at_ceiling_fixed_louder record bound counts.",
+        se_note: "Curvature-based SE underestimates true match SD by ~25% at 16 trials/match; NEA inversion uses empirical pilot test-retest SD."
+      },
+      calibration: {
+        ...sess.calibration,
+        refDbfsRms60: fsInfo.refDbfsRms60,
+        fullScale1kSpl: fsInfo.fullScale1kSpl,
+        gainAboveQclsDb: fsInfo.gainAboveQclsDb
+      },
+      level_limits: {
+        initial_max_output_spl: sess.settings?.initialMaxOutputSpl ?? 100,
+        final_ceiling_spl: sess.ceilingSpl,
+        equipment_max_spl: EQUIPMENT_MAX_SPL,
+        listener_limits: sess.settings?.limits || {},
+        qcls_contour_file: sess.settings?.qclsSourceFile || null,
+        too_loud_events: sess.tooLoudEvents || []
+      },
+      practice_summary: sess.practice || null,
+      pse_summary: pseRows
+    };
+
+    return JSON.stringify(payload, null, 2) + "\n";
+  }
+
   const api = {
     APP_VERSION,
     DEFAULT_FS,
     REF_SPL_DB,
+    DEFAULT_REF_DBFS_60DB,
+    MIN_REF_DBFS_60DB,
+    MAX_REF_DBFS_60DB,
+    QCLS_REF_DBFS_60DB,
     REF_DIGITAL_RMS_60DB,
     LOGISTIC_K,
     FIXED_LAPSE,
@@ -1114,6 +1617,10 @@
     CENTER_FREQS_HZ,
     CALIBRATION_FREQS,
     TRANSDUCER_PRESETS,
+    clampRefDbfs60,
+    resolveRefDbfs60,
+    resolveRefDigitalRms60,
+    computeFullScale1kSpl,
     getComplexComponentFreqs,
     lookupCalOffsetDb,
     createRng,
@@ -1127,7 +1634,12 @@
     applyCeilingChangeToTrack,
     fitBlockML,
     evaluateBlockMatches,
-    runSimulatedBlock
+    runSimulatedBlock,
+    applyTooLoudToSession,
+    collectSessionPseRows,
+    formatPseCsv,
+    formatTbtCsv,
+    formatSesJson
   };
 
   if (typeof module !== "undefined" && module.exports) {

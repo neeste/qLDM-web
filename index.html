@@ -162,8 +162,8 @@
       <!-- IDLE / PRE-SESSION HEADROOM PREVIEW CARD -->
       <div class="card" id="idle-card">
         <h2>Pre-Session System Headroom &amp; Active Match Plan</h2>
-        <p class="muted-note">
-          Digital reference: <strong>&minus;70.0 dBFS RMS = 60.0 dB SPL</strong> (30 dB extra headroom vs. qCLS; recommend <strong>24-bit / 48 kHz</strong> OS output format with OS audio enhancements disabled). Any buffer exceeding <code>0 dBFS</code> or ceiling is refused before playback.
+        <p class="muted-note" id="idle-ref-summary">
+          Digital reference: <strong>&minus;60.0 dBFS RMS = 60.0 dB SPL</strong> (+20.0 dB analog gain re qCLS; full-scale 1 kHz tone = <strong>116.9 dB SPL</strong>; <strong>24-bit / 48 kHz</strong> OS output path required with OS audio enhancements disabled). Any buffer exceeding <code>0 dBFS</code>, missing calibration, or exceeding ceiling is refused before playback.
         </p>
         <div id="headroom-preview-wrap"></div>
         <h3 style="margin-top:18px;">Active Match Table Preview (<span id="match-count-lbl">0</span> matches)</h3>
@@ -233,6 +233,7 @@
                 <th>Fit SE (dB)*</th>
                 <th>Block &sigma; (dB)</th>
                 <th>Trials</th>
+                <th>At Ceiling (F&gt;V / N)</th>
                 <th>Upper / Lower End</th>
                 <th>Flags / Reason</th>
               </tr>
@@ -246,6 +247,25 @@
       </div>
     </section>
   </main>
+
+  <!-- OPERATOR ANALOG GAIN CONFIRMATION MODAL -->
+  <div class="modal-backdrop" id="gain-confirm-modal">
+    <div class="modal-box">
+      <h2>Operator Hardware &amp; Analog Gain Check</h2>
+      <div id="gain-confirm-details" class="instruction-quote" style="font-size:15px;"></div>
+      <p class="muted-note" style="margin-bottom:12px;">
+        Because qLDM uses a lower digital reference than qCLS to accommodate the 10-dB crest factor and insert-phone roll-off of 100 dB SPL five-tone complexes, verify that your hardware attenuator / output gain is set to the <strong>qLDM setting</strong> (and remember to restore the qCLS setting before running qCLS).
+      </p>
+      <label class="check-row" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:7px; padding:10px 12px;">
+        <input type="checkbox" id="gain-confirm-chk">
+        <span><strong>I confirm the analog hardware gain / attenuator is set to the qLDM calibration setting.</strong></span>
+      </label>
+      <div class="modal-actions">
+        <button type="button" id="gain-confirm-cancel-btn" class="btn btn-outline">Cancel</button>
+        <button type="button" id="gain-confirm-ok-btn" class="btn btn-primary" disabled>Confirm Gain &amp; Continue</button>
+      </div>
+    </div>
+  </div>
 
   <!-- INSTRUCTION / BLOCK GATE MODAL -->
   <div class="modal-backdrop" id="instruction-modal">
@@ -298,16 +318,20 @@
     <div class="modal-box wide">
       <h2>Per-Frequency Coupler Calibration &amp; Unclipped Headroom</h2>
       <p class="muted-note">
-        Measure each component frequency in an acoustic coupler at fixed system output volume (24-bit, 48 kHz, OS enhancements off). Enter the sound-level meter reading (<code>dB SPL</code>) while playing the continuous calibration tone: the app sets <code>Offset = Measured SPL &minus; Nominal Tone Level</code> so all five components of every complex have equal acoustic SPL.
+        Measure each of the 18 component frequencies in the <strong>same acoustic coupler and reference convention used for qCLS</strong> (24-bit, 48 kHz, OS enhancements off) so levels at 1 and 4 kHz match across both apps. Enter the sound-level meter reading (<code>dB SPL</code>) while playing the continuous tone to update <code>Sensitivity Offset</code>.
       </p>
 
-      <div class="field-grid" style="grid-template-columns: 2fr 1fr 1fr; margin-top:10px;">
+      <div class="field-grid" style="grid-template-columns: 1.6fr 1.1fr 1.1fr 1fr; margin-top:10px;">
         <div class="field">
           <label for="cal-preset-sel">Load Preset</label>
           <select id="cal-preset-sel">
             <option value="er3a_nominal">ER-3A Insert (Nominal Starting Curve)</option>
             <option value="flat_ref">Flat 0-dB Reference</option>
           </select>
+        </div>
+        <div class="field">
+          <label for="cal-ref-dbfs">Digital Ref @ 60 dB SPL (dBFS)</label>
+          <input type="number" id="cal-ref-dbfs" value="-60.0" min="-70" max="-50" step="0.5">
         </div>
         <div class="field">
           <label for="cal-transducer-name">Transducer Label</label>
@@ -319,17 +343,23 @@
         </div>
       </div>
 
+      <div id="cal-fullscale-readout" class="banner banner-info" style="margin:6px 0 10px; padding:9px 12px; font-size:13px;"></div>
+
       <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:7px; padding:12px; margin:10px 0;">
         <div style="display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap;">
           <div class="field" style="margin:0; min-width:170px;">
             <label for="cal-tone-freq">Continuous Tone Freq (Hz)</label>
             <select id="cal-tone-freq"></select>
           </div>
-          <div class="field" style="margin:0; width:150px;">
-            <label for="cal-tone-spl">Nominal Tone Level (dB)</label>
-            <input type="number" id="cal-tone-spl" value="80" min="50" max="95" step="1">
+          <div class="field" style="margin:0; width:145px;">
+            <label for="cal-tone-spl">Nominal Level (dB SPL)</label>
+            <input type="number" id="cal-tone-spl" value="80" min="30" max="100" step="1">
           </div>
-          <div class="field" style="margin:0; width:130px;">
+          <div style="display:flex; gap:5px;">
+            <button type="button" id="cal-lvl-30-btn" class="btn btn-outline" style="padding:7px 9px; font-size:12px;" title="Check 24-bit resolution at lowest tone level (30 dB SPL)">30 dB Check</button>
+            <button type="button" id="cal-lvl-80-btn" class="btn btn-outline" style="padding:7px 9px; font-size:12px;" title="Set nominal coupler calibration level (80 dB SPL)">80 dB Ref</button>
+          </div>
+          <div class="field" style="margin:0; width:120px;">
             <label for="cal-tone-ear">Output Channel</label>
             <select id="cal-tone-ear">
               <option value="Left">Left</option>
@@ -337,7 +367,7 @@
             </select>
           </div>
           <button type="button" id="cal-play-btn" class="btn btn-primary">Play Continuous Tone</button>
-          <div class="field" style="margin:0; width:165px;">
+          <div class="field" style="margin:0; width:155px;">
             <label for="cal-measured-spl">Meter Reading (dB SPL)</label>
             <input type="number" id="cal-measured-spl" placeholder="e.g. 79.5" step="0.1">
           </div>
@@ -346,7 +376,7 @@
         <div id="cal-tone-readout" class="muted-note" style="margin-top:8px;">Tone stopped.</div>
       </div>
 
-      <div style="max-height:250px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px;">
+      <div style="max-height:240px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px;">
         <table class="data-table" style="margin:0;">
           <thead>
             <tr>
@@ -359,6 +389,7 @@
           <tbody id="cal-table-tbody"></tbody>
         </table>
       </div>
+      <div id="cal-save-err" class="muted-note" style="color:#b91c1c; font-weight:700; margin-top:6px; display:none;"></div>
 
       <div class="modal-actions">
         <button type="button" id="cal-close-btn" class="btn btn-outline">Close</button>

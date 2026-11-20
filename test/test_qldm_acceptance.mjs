@@ -178,13 +178,43 @@ for (const [sigma, expSd] of [[2.5, 1.0], [4.0, 1.5], [6.0, 2.2]]) {
 }
 
 /* -------------------------------------------------------------------------
- * 4. No Clipping Across Standard & Extended Sets + Safety Guard (Advice §3, §6, §9.3)
+ * 4. Digital Reference (-60 dBFS default, -70..-50 range), Full-Scale 1 kHz,
+ *    30 dB SPL Low-Level Tone, & No Clipping Across Sets (Follow-up §1)
  * ------------------------------------------------------------------------- */
+assert.equal(QLDM.DEFAULT_REF_DBFS_60DB, -60.0);
+assert.equal(QLDM.clampRefDbfs60(-80), -70.0);
+assert.equal(QLDM.clampRefDbfs60(-40), -50.0);
+
+const fs60 = QLDM.computeFullScale1kSpl(QLDM.TRANSDUCER_PRESETS.er3a_nominal);
+assert.equal(fs60.refDbfsRms60, -60.0);
+assert.equal(fs60.gainAboveQclsDb, 20.0);
+assert.equal(fs60.fullScale1kSpl, 116.9);
+
+const fs70 = QLDM.computeFullScale1kSpl({ ...QLDM.TRANSDUCER_PRESETS.er3a_nominal, refDbfsRms60: -70.0 });
+assert.equal(fs70.gainAboveQclsDb, 30.0);
+assert.equal(fs70.fullScale1kSpl, 126.9);
+
+/* 30 dB SPL pure tone at -60 dBFS should synthesize cleanly with peak ~1.46 16-bit steps */
+const lowTone30 = QLDM.generateSoundWaveform({
+  centerHz: 1000,
+  sound: QLDM.SOUND_TONE,
+  levelSpl: 30.0,
+  calTable: QLDM.TRANSDUCER_PRESETS.flat_ref,
+  ceilingSpl: 100.0
+});
+assert.equal(lowTone30.ok, true);
+const steps16Bit = lowTone30.peak * 32768.0;
+assert.ok(steps16Bit > 1.4 && steps16Bit < 1.55, `Expected ~1.46 16-bit steps at 30 dB/-60 dBFS, got ${steps16Bit}`);
+console.log(
+  `\n[PASS Digital Ref] Default -60.0 dBFS => 1 kHz 0 dBFS = ${fs60.fullScale1kSpl} dB SPL (+${fs60.gainAboveQclsDb} dB re qCLS), ` +
+  `30 dB tone peak = ${steps16Bit.toFixed(2)} 16-bit steps`
+);
+
 for (const preset of [QLDM.TRANSDUCER_PRESETS.er3a_nominal, QLDM.TRANSDUCER_PRESETS.flat_ref]) {
   const headroom = QLDM.computeMaxUnclippedLevels(preset, { durationMs: 500, rampMs: 20 });
   const minMaxSpl = Math.min(...headroom.map(h => h.maxUnclippedSpl));
-  console.log(`\n[PASS Headroom: ${preset.id}] Lowest max-unclipped ceiling across all 6 stimuli = ${minMaxSpl.toFixed(1)} dB SPL (> 100 dB SPL)`);
-  assert.ok(minMaxSpl >= 105.0, `Expected >= 105 dB SPL unclipped ceiling, got ${minMaxSpl}`);
+  console.log(`[PASS Headroom @ -60 dBFS: ${preset.id}] Lowest max-unclipped ceiling across all 6 stimuli = ${minMaxSpl.toFixed(1)} dB SPL (> 100 dB SPL)`);
+  assert.ok(minMaxSpl >= 102.0, `Expected >= 102.0 dB SPL unclipped ceiling at -60 dBFS, got ${minMaxSpl}`);
 
   const extMatches = QLDM.buildMatchTable({ matchSet: "extended", includeNullMatches: true, includeReverseMatches: true });
   for (const m of extMatches) {
@@ -204,11 +234,13 @@ for (const preset of [QLDM.TRANSDUCER_PRESETS.er3a_nominal, QLDM.TRANSDUCER_PRES
   }
 }
 
-/* Verify safety guard blocks clipping, ceiling violations, and NaN buffers */
+/* -------------------------------------------------------------------------
+ * 5. Safety Guard: Clipping, Ceiling, NaN, & Missing Calibration Entry (Follow-up §4)
+ * ------------------------------------------------------------------------- */
 const clipRes = QLDM.generateSoundWaveform({
   centerHz: 4000,
   sound: QLDM.SOUND_1OCT,
-  levelSpl: 125.0,
+  levelSpl: 115.0,
   calTable: QLDM.TRANSDUCER_PRESETS.er3a_nominal,
   ceilingSpl: 130.0
 });
@@ -229,18 +261,223 @@ const nanBuf = new Float64Array(100);
 nanBuf[42] = NaN;
 assert.equal(QLDM.verifyBufferSafety(nanBuf, { sampleRate: 48000, compFreqs: [1000] }).reason, "NAN_OR_INFINITE_SAMPLE");
 
-/* Verify component-listening flag triggers when all forward matches <= -6 dB */
-const compMatches = QLDM.buildMatchTable({ matchSet: "standard" }).filter(m => m.centerHz === 1000);
-const compPairs = compMatches.map(m => {
-  const u = QLDM.createTrackState(m, "upper", { trialsPerTrack: 8 });
-  const l = QLDM.createTrackState(m, "lower", { trialsPerTrack: 8 });
+/* Missing component calibration entry must refuse stimulus (not default to 0 dB) */
+const incompleteCal = {
+  ...QLDM.TRANSDUCER_PRESETS.er3a_nominal,
+  offsetsDb: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
+};
+delete incompleteCal.offsetsDb["5656.8542"];
+assert.ok(Number.isNaN(QLDM.lookupCalOffsetDb(incompleteCal, 5656.8542)));
+const missingCalRes = QLDM.generateSoundWaveform({
+  centerHz: 4000,
+  sound: QLDM.SOUND_1OCT,
+  levelSpl: 70.0,
+  calTable: incompleteCal,
+  ceilingSpl: 100.0
+});
+assert.equal(missingCalRes.ok, false);
+assert.equal(missingCalRes.reason, "MISSING_CALIBRATION_ENTRY");
+console.log(`[PASS Safety Guard] Verified refusal of DIGITAL_CLIP_PREVENTED, CEILING_EXCEEDED_BY_BUFFER, NAN_OR_INFINITE_SAMPLE, and MISSING_CALIBRATION_ENTRY.`);
+
+/* -------------------------------------------------------------------------
+ * 6. AT_CEILING vs. AT_LIMIT_3_CONSEC & Bound Counts (Follow-up §2)
+ * ------------------------------------------------------------------------- */
+const std1k = QLDM.buildMatchTable({ matchSet: "standard" }).filter(m => m.centerHz === 1000);
+const capPairs = std1k.map(m => {
+  const u = QLDM.createTrackState(m, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 });
+  const l = QLDM.createTrackState(m, "lower", { trialsPerTrack: 8, ceilingSpl: 100.0 });
   for (let i = 0; i < 8; i++) {
-    QLDM.stepTrack(u, u.curVariedSpl > m.fixedLevelSpl - 7.0, 100);
-    QLDM.stepTrack(l, l.curVariedSpl > m.fixedLevelSpl - 7.0, 100);
+    if (m.fixedLevelSpl === 100) {
+      /* Listener always judges 100 dB complex louder than capped 100 dB tone -> hits ceiling */
+      QLDM.stepTrack(u, false, 100.0);
+      QLDM.stepTrack(l, false, 100.0);
+    } else if (m.fixedLevelSpl === 60) {
+      /* Listener always judges 60 dB complex louder -> hits +20 dB range limit at 80 dB (< 100 ceiling) */
+      QLDM.stepTrack(u, false, 100.0);
+      QLDM.stepTrack(l, false, 100.0);
+    } else {
+      QLDM.stepTrack(u, u.curVariedSpl > m.fixedLevelSpl, 100.0);
+      QLDM.stepTrack(l, l.curVariedSpl > m.fixedLevelSpl, 100.0);
+    }
   }
   return { upper: u, lower: l };
 });
-const compEval = QLDM.evaluateBlockMatches(compMatches, compPairs, { componentFlagThresholdDb: -6.0 });
-assert.equal(compEval.componentMatchFlag, true, "Component-listening flag should trigger at -7 dB across block");
+const capEval = QLDM.evaluateBlockMatches(std1k, capPairs, { componentFlagThresholdDb: -6.0 });
+const row100 = capEval.rows.find(r => r.fixedLevelSpl === 100);
+const row60 = capEval.rows.find(r => r.fixedLevelSpl === 60);
+assert.ok(row100.flags.includes("AT_CEILING"), "100 dB match should carry AT_CEILING");
+assert.ok(!row100.flags.includes("AT_LIMIT_3_CONSEC"), "100 dB match at ceiling should not carry AT_LIMIT_3_CONSEC");
+assert.ok(row100.nAtCeiling >= 10 && row100.nAtCeilingFixedLouder === row100.nAtCeiling);
+assert.ok(row60.flags.includes("AT_LIMIT_3_CONSEC"), "60 dB match hitting 80 dB (+20 range) should carry AT_LIMIT_3_CONSEC");
+assert.ok(!row60.flags.includes("AT_CEILING"), "60 dB match at 80 dB should not carry AT_CEILING");
+assert.equal(row60.nAtCeiling, 0);
+console.log(
+  `[PASS Ceiling Bounds] 100 dB match: flags=[${row100.flags.join(",")}], n_at_ceiling=${row100.nAtCeiling}, ` +
+  `fixed_louder=${row100.nAtCeilingFixedLouder} | 60 dB (+20 range): flags=[${row60.flags.join(",")}]`
+);
+
+/* -------------------------------------------------------------------------
+ * 7. Component-Listening Flag on Extended Set (Follow-up §3):
+ *    1-octave matches at -7 dB, 1/4-octave matches at -1 dB => flag fires & marks ONLY 1-octave
+ * ------------------------------------------------------------------------- */
+const ext1k = QLDM.buildMatchTable({ matchSet: "extended" }).filter(m => m.centerHz === 1000);
+const extCompPairs = ext1k.map(m => {
+  const targetDelta = m.fixedSound.bwOct === 1.0 ? -7.0 : -1.0;
+  const u = QLDM.createTrackState(m, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 });
+  const l = QLDM.createTrackState(m, "lower", { trialsPerTrack: 8, ceilingSpl: 100.0 });
+  for (let i = 0; i < 8; i++) {
+    QLDM.stepTrack(u, u.curVariedSpl > m.fixedLevelSpl + targetDelta, 100.0);
+    QLDM.stepTrack(l, l.curVariedSpl > m.fixedLevelSpl + targetDelta, 100.0);
+  }
+  return { upper: u, lower: l };
+});
+const extCompEval = QLDM.evaluateBlockMatches(ext1k, extCompPairs, { componentFlagThresholdDb: -6.0 });
+assert.equal(extCompEval.componentMatchFlag, true, "Extended-set component flag must fire when 1-oct matches are at -7 dB and 1/4-oct at -1 dB");
+for (const r of extCompEval.rows) {
+  if (r.fixedSound.bwOct === 1.0) {
+    assert.ok(r.flags.includes("COMPONENT_MATCH_SUSPECTED"), `Expected 1-oct row ${r.id} marked COMPONENT_MATCH_SUSPECTED`);
+  } else {
+    assert.ok(!r.flags.includes("COMPONENT_MATCH_SUSPECTED"), `Quarter-oct row ${r.id} must NOT be marked COMPONENT_MATCH_SUSPECTED`);
+  }
+}
+console.log(`[PASS Extended Component Flag] 1-oct (-7 dB) flagged & marked; 1/4-oct (-1 dB) unmarked.`);
+
+/* -------------------------------------------------------------------------
+ * 8. Headless Exercise of "Too Loud" Flow, Reload Recovery, & CSV/JSON Exports
+ * ------------------------------------------------------------------------- */
+function makeMockSession(seed) {
+  const rngLocal = QLDM.createRng(seed);
+  const matches1k = QLDM.buildMatchTable({ matchSet: "short4" }).filter(m => m.centerHz === 1000);
+  const matches4k = QLDM.buildMatchTable({ matchSet: "short4" }).filter(m => m.centerHz === 4000);
+  const mkBlk = (fc, ms) => ({
+    blockPass: 1,
+    centerHz: fc,
+    matches: ms.map(m => ({ ...m, blockPass: 1, excludedReason: "" })),
+    pairs: ms.map(m => ({
+      upper: QLDM.createTrackState(m, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 }),
+      lower: QLDM.createTrackState(m, "lower", { trialsPerTrack: 8, ceilingSpl: 100.0 })
+    })),
+    trialsInBlockCompleted: 0,
+    completed: false,
+    evalSummary: null
+  });
+  return {
+    rngLocal,
+    sess: {
+      sessionId: "TEST_SES",
+      appVersion: QLDM.APP_VERSION,
+      createdAtIso: "2026-11-20T15:00:00Z",
+      dateYmd: "20261120",
+      participantId: "SUBJ_TEST",
+      ear: "Right",
+      earCode: "R",
+      settings: {
+        matchSet: "short4",
+        durationMs: 500,
+        rampMs: 20,
+        gapMs: 400,
+        itiMs: 300,
+        trialsPerTrack: 8,
+        initialMaxOutputSpl: 100,
+        compFlagDb: -6.0,
+        initialSeed: seed,
+        limits: { cu5_1k: 25, ucl_1k: null, cu5_4k: 35, ucl_4k: null }
+      },
+      analogGainConfirmation: {
+        confirmed: true,
+        confirmed_at_iso: "2026-11-20T15:00:00Z",
+        ref_dbfs_rms_at_60db_spl: -60.0,
+        analog_gain_above_qcls_db: 20.0,
+        full_scale_1khz_spl_db: 116.9
+      },
+      audioInfo: { requestedSampleRate: 48000, grantedSampleRate: 48000, outputDevices: ["Coupler Test DAC"] },
+      calibration: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal },
+      rngState: rngLocal.getState(),
+      ceilingSpl: 100.0,
+      tooLoudEvents: [],
+      blocks: [mkBlk(1000, matches1k), mkBlk(4000, matches4k)],
+      activeBlockArrayIndex: 0,
+      phase: "block",
+      tbtRows: []
+    }
+  };
+}
+
+/* 8a. Reload recovery equivalence: run halfway, serialize/deserialize JSON + RNG state, finish */
+const runContinuous = makeMockSession(999111);
+const runReloaded = makeMockSession(999111);
+
+function stepMockSessionOnce(sess, rngInst) {
+  const blk = sess.blocks[sess.activeBlockArrayIndex];
+  const active = [];
+  blk.pairs.forEach(p => {
+    if (p.upper && !p.upper.finished) active.push(p.upper);
+    if (p.lower && !p.lower.finished) active.push(p.lower);
+  });
+  if (active.length === 0) {
+    blk.completed = true;
+    blk.evalSummary = QLDM.evaluateBlockMatches(blk.matches, blk.pairs, { componentFlagThresholdDb: -6.0 });
+    sess.activeBlockArrayIndex += 1;
+    return sess.activeBlockArrayIndex < sess.blocks.length;
+  }
+  const tr = active[Math.floor(rngInst.next() * active.length)];
+  const vInt = rngInst.next() < 0.5 ? 1 : 2;
+  const resp = rngInst.next() < 0.5;
+  sess.rngState = rngInst.getState();
+  QLDM.stepTrack(tr, resp, sess.ceilingSpl);
+  blk.trialsInBlockCompleted += 1;
+  sess.tbtRows.push({
+    phase: "block", blockPass: 1, blockHz: blk.centerHz, matchId: tr.matchId, role: tr.role,
+    trackId: tr.trackId, trackSlot: tr.slotLabel, trialInBlock: blk.trialsInBlockCompleted,
+    trialInTrack: tr.trialsCompleted, centerHz: tr.centerHz, bandwidthOct: 1.0,
+    fixedSound: "5tc_1oct", variedSound: "tone", fixedLevelSpl: tr.fixedLevelSpl,
+    variedLevelSpl: tr.variedLevelsSpl[tr.variedLevelsSpl.length - 1], variedInterval: vInt,
+    interval1Sound: vInt === 1 ? "tone" : "5tc_1oct", interval1Spl: 60,
+    interval2Sound: vInt === 2 ? "tone" : "5tc_1oct", interval2Spl: 60,
+    responseInterval: resp ? vInt : (vInt === 1 ? 2 : 1), variedJudgedLouder: resp ? 1 : 0,
+    tooLoud: 0, rtMs: 420, ceilingSpl: sess.ceilingSpl, guardStatus: "OK"
+  });
+  return true;
+}
+
+while (stepMockSessionOnce(runContinuous.sess, runContinuous.rngLocal)) { /* run to completion */ }
+for (let step = 0; step < 20; step++) stepMockSessionOnce(runReloaded.sess, runReloaded.rngLocal);
+/* Simulate browser reload from localStorage JSON */
+const restoredSess = JSON.parse(JSON.stringify(runReloaded.sess));
+const restoredRng = QLDM.createRng(1);
+restoredRng.setState(restoredSess.rngState);
+while (stepMockSessionOnce(restoredSess, restoredRng)) { /* finish after reload */ }
+
+assert.equal(QLDM.formatPseCsv(restoredSess), QLDM.formatPseCsv(runContinuous.sess), "Reloaded session PSE CSV must match uninterrupted run identically");
+assert.equal(QLDM.formatTbtCsv(restoredSess), QLDM.formatTbtCsv(runContinuous.sess), "Reloaded session TBT CSV must match uninterrupted run identically");
+
+/* 8b. "Too loud" flow & file exports */
+const tlRun = makeMockSession(777333);
+/* Trigger two "Too loud" presses (100 -> 95 -> 90 -> 85 dB), dropping 90 dB unstarted matches in Block 2 */
+for (let k = 0; k < 3; k++) {
+  const tr90 = tlRun.sess.blocks[0].pairs[1].upper;
+  QLDM.applyTooLoudToSession(tlRun.sess, {
+    isPractice: false, trackRef: tr90, blockPass: 1, blockHz: 1000, matchId: tr90.matchId,
+    role: "forward", trackId: tr90.trackId, trackSlot: "upper", centerHz: 1000, bandwidthOct: 1.0,
+    fixedSound: QLDM.SOUND_1OCT, variedSound: QLDM.SOUND_TONE, fixedLevelSpl: 90, variedLevelSpl: 100,
+    variedInterval: 1, sound1: QLDM.SOUND_TONE, level1Spl: 100, sound2: QLDM.SOUND_1OCT, level2Spl: 90
+  }, "2026-11-20T15:02:00Z");
+}
+assert.equal(tlRun.sess.ceilingSpl, 85.0, "Three Too Loud presses should lower ceiling from 100 to 85 dB SPL");
+assert.equal(tlRun.sess.blocks[0].pairs[1].upper.stopReason, "TOO_LOUD_CEILING");
+assert.ok(tlRun.sess.blocks[1].matches[1].excludedReason.startsWith("TOO_LOUD_CEILING"), "Unstarted 90 dB match in Block 2 must be excluded by 85 dB ceiling");
+
+while (stepMockSessionOnce(tlRun.sess, tlRun.rngLocal)) { /* finish remaining 60 dB tracks */ }
+const pseCsv = QLDM.formatPseCsv(tlRun.sess);
+const tbtCsv = QLDM.formatTbtCsv(tlRun.sess);
+const sesObj = JSON.parse(QLDM.formatSesJson(tlRun.sess, "2026-11-20T15:05:00Z"));
+
+assert.ok(pseCsv.includes("n_at_ceiling,n_at_ceiling_fixed_louder"), "LM_PSE header must include ceiling bound columns");
+assert.ok(tbtCsv.includes("TOO_LOUD_PRESSED"), "LM_TBT must log TOO_LOUD_PRESSED events");
+assert.equal(sesObj.analog_gain_confirmation.confirmed, true, "LM_SES JSON must record operator analog gain confirmation");
+assert.equal(sesObj.stimulus_definition.reference_dbfs_rms_at_60db_spl, -60.0);
+assert.equal(sesObj.stimulus_definition.nominal_full_scale_1khz_spl_db, 116.9);
+assert.equal(sesObj.level_limits.too_loud_events.length, 3);
+console.log(`[PASS Session Flows] Verified mid-session JSON reload recovery, Too Loud ceiling step-down, and LM_PSE / LM_TBT / LM_SES exports.`);
 
 console.log("\nALL qLDM ACCEPTANCE TESTS PASSED.");

@@ -55,15 +55,16 @@
           </ul>
         </li>
         <li><strong>Disable All OS Sound Processing:</strong> Turn off Spatial Audio, loudness equalization, bass boost, and communications ducking.</li>
-        <li><strong>Lock Analog / System Gain:</strong> qLDM uses <code>&minus;70.0 dBFS RMS = 60.0 dB SPL</code> as its digital reference (30 dB more headroom than qCLS). Adjust your headphone amplifier or DAC output knob during coupler calibration so an <code>80 dB SPL</code> calibration tone reads <code>80.0 dB SPL</code> on the sound-level meter with plenty of clean analog headroom, then lock that volume setting.</li>
-        <li><strong>Strict Pre-Playback Clipping Guard:</strong> Before any trial buffer is sent to Web Audio, qLDM inspects the synthesized waveform samples directly and refuses to play any buffer whose digital peak exceeds <code>0 dBFS</code> (<code>1.0</code>) or whose coupler-calibrated RMS exceeds the active ceiling.</li>
+        <li><strong>Set &amp; Confirm Digital Reference and Analog Gain:</strong> qLDM defaults to <code>&minus;60.0 dBFS RMS = 60.0 dB SPL</code> (adjustable in calibration from <code>&minus;70</code> to <code>&minus;50 dBFS</code>). At <code>&minus;60 dBFS</code>, the analog hardware gain is <code>+20.0 dB</code> above qCLS (<code>&minus;40 dBFS</code>), a full-scale (<code>0 dBFS</code> peak) 1 kHz tone is nominally <code>116.9 dB SPL</code>, and the nominal ER-3A table leaves an unclipped ceiling of <code>102.3 dB SPL</code> across all stimuli. Because qCLS and qLDM share hardware in a single visit, use a fixed switched attenuator (recommended) or calibrated stepped hardware gain, confirm the qLDM gain at the start of every session, and restore the qCLS gain before running qCLS.</li>
+        <li><strong>Verify 30 dB SPL Low-Level Resolution:</strong> At <code>&minus;60 dBFS</code>, a <code>30 dB SPL</code> tone has a peak of <code>1.5</code> 16-bit steps (<code>56–59 dB</code> above the ideal 24-bit floor), so a true 24-bit output path is mandatory. Use the <strong>30 dB Check</strong> button in the calibration modal to verify clean resolution of the quietest tone.</li>
+        <li><strong>Strict Pre-Playback Safety Guard:</strong> Before any trial buffer is sent to Web Audio, qLDM inspects the synthesized waveform samples directly and refuses to play any buffer that lacks a component calibration entry, exceeds <code>0 dBFS</code> (<code>1.0</code>), or exceeds the active ceiling.</li>
       </ol>
     </section>
 
     <section class="guide-card">
       <h2>3. Per-Component Acoustic Coupler Calibration Protocol</h2>
       <p>
-        Unlike pure-tone scaling at 1 kHz alone, the 1-octave complex at 4 kHz spans <code>2828 Hz</code> to <code>5657 Hz</code>, where insert earphones such as the ER-3A roll off steeply. Every component of every complex must be equalized in an acoustic coupler:
+        Unlike pure-tone scaling at 1 kHz alone, the 1-octave complex at 4 kHz spans <code>2828 Hz</code> to <code>5657 Hz</code>, where insert earphones such as the ER-3A roll off steeply. <strong>Measure the table using the exact same coupler and reference convention as your qCLS calibration</strong> so levels at 1 and 4 kHz have identical acoustic meaning across both apps:
       </p>
       <ol>
         <li>Connect the test transducer (e.g., Etymotic ER-3A) to a calibrated 2-cc (HA-2) or occluded-ear simulator coupler and sound-level meter.</li>
@@ -87,20 +88,21 @@
         </li>
         <li><strong>8-Trial Practice with Obvious Checks:</strong> Trials 1–3 present unmistakable <code>&plusmn;10–12 dB</code> level differences and report the listener's score to the tester.</li>
         <li><strong>Post-Practice Tester Check:</strong> Prompts the tester to ask, <em>&ldquo;What did you compare between the two sounds?&rdquo;</em> before starting Block 1, with a 1-click option to repeat Practice.</li>
-        <li><strong>Automatic Block Flag &amp; Repeat:</strong> If every completed forward match in a block has <code>&Delta; &le; &minus;6.0 dB</code>, qLDM flags <code>COMPONENT_MATCH_SUSPECTED</code> and provides a 1-click <strong>Repeat Block with Instruction</strong> button (retaining both passes in the exported CSV/JSON).</li>
+        <li><strong>Automatic Block Flag &amp; Repeat:</strong> If every completed forward 1-octave match in a block has <code>&Delta; &le; &minus;6.0 dB</code>, qLDM flags <code>COMPONENT_MATCH_SUSPECTED</code> on those 1-octave matches and provides a 1-click <strong>Repeat Block with Instruction</strong> button (retaining both passes in the exported CSV/JSON).</li>
       </ul>
     </section>
 
     <section class="guide-card">
-      <h2>5. Listener Limits &amp; Output Files</h2>
+      <h2>5. Listener Limits, Ceiling Bounds, &amp; Output Files</h2>
       <ul>
         <li><strong>Listener Limits:</strong> Enter 1 kHz and 4 kHz <code>CU 5</code> and <code>Too Loud (CU 50)</code> values manually or click <strong>Import qCLS_ELC CSV</strong> to load them directly from the participant's qCLS equal-loudness contour file. Any fixed complex level below <code>CU 5 + 10 dB</code> or above <code>Too Loud</code> / <code>Max Output</code> is skipped and recorded in <code>LM_PSE</code> with its exact reason.</li>
+        <li><strong>Ceiling Cap &amp; Bound Counts:</strong> When the varied sound reaches <code>Max Output</code> (or a ceiling lowered by <code>Too Loud</code>) on three consecutive trials, the match is flagged <code>AT_CEILING</code> (distinct from <code>AT_LIMIT_3_CONSEC</code> for the <code>&plusmn;20 dB</code> offset range and <code>10 dB</code> floor), and <code>LM_PSE</code> records both <code>n_at_ceiling</code> and <code>n_at_ceiling_fixed_louder</code> so downstream NEA inversion can treat capped matches as statistical bounds without excluding or repeating them.</li>
         <li><strong>In-Trial &ldquo;Too Loud&rdquo; Button:</strong> Always active during testing; immediately stops playback, lowers the session ceiling by <code>5 dB</code> for the remainder of the session, and ends any track whose fixed level exceeds the new ceiling.</li>
         <li><strong>Three Downloads (Client-Side):</strong>
           <ul>
-            <li><code>LM_PSE_[ID]_[L|R]_[YYYYMMDD].csv</code> — One row per match (<code>&Delta;</code>, tone PSE, curvature SE, shared block <code>&sigma;</code>, track endpoints, flags, exclusion reasons).</li>
+            <li><code>LM_PSE_[ID]_[L|R]_[YYYYMMDD].csv</code> — One row per match (<code>&Delta;</code>, tone PSE, curvature SE, shared block <code>&sigma;</code>, <code>n_at_ceiling</code>, <code>n_at_ceiling_fixed_louder</code>, track endpoints, flags, exclusion reasons).</li>
             <li><code>LM_TBT_[ID]_[L|R]_[YYYYMMDD].csv</code> — Complete trial-by-trial log (block, pass, track, stimuli, levels, interval order, response, RT in ms, active ceiling).</li>
-            <li><code>LM_SES_[ID]_[L|R]_[YYYYMMDD].json</code> — Full provenance record (version, RNG seed, sample rate, audio devices, exact component frequencies &amp; phases, coupler calibration table, headroom limits, and PSE summary).</li>
+            <li><code>LM_SES_[ID]_[L|R]_[YYYYMMDD].json</code> — Full provenance record (version, RNG seed, analog gain confirmation, digital reference &amp; full-scale 1 kHz SPL, sample rate, audio devices, exact component frequencies &amp; phases, coupler calibration table, headroom limits, and PSE summary).</li>
           </ul>
         </li>
       </ul>
