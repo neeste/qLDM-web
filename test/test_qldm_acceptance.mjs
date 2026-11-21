@@ -535,4 +535,99 @@ assert.equal(v1SesExport.stimulus_definition.analog_gain_above_qcls_db, 30.0);
 assert.equal(QLDM.TRANSDUCER_PRESETS.er3a_nominal.refDbfsRms60, -60.0);
 console.log(`[PASS Legacy v1.0.0 Compatibility] v1 records & sessions preserve -70.0 dBFS (+30 dB re qCLS, exact v1.0.0 digital RMS); new calibrations default to -60.0 dBFS.`);
 
+/* -------------------------------------------------------------------------
+ * 10. v1.1.2 Booth Polish: Calibration JSON Export/Import, Per-Ear Offsets,
+ *     Random Seed Generation, Flexible qCLS_ELC Parsing, & Results SVG Plot
+ * ------------------------------------------------------------------------- */
+assert.equal(QLDM.APP_VERSION, "1.1.2");
+
+/* 10a. Per-ear Left/Right receiver calibration + JSON export/import round-trip */
+const perEarCal = {
+  id: "er3a_dual",
+  name: "Booth A ER-3A Pair",
+  couplerVerified: true,
+  date: "2026-11-21",
+  refDbfsRms60: -60.0,
+  perEarEnabled: true,
+  offsetsByEar: {
+    Left: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal.offsetsDb, "4000": -3.5, "5656.8542": -12.0 },
+    Right: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal.offsetsDb, "4000": -5.5, "5656.8542": -15.0 }
+  },
+  offsetsDb: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
+};
+assert.equal(QLDM.lookupCalOffsetDb(perEarCal, 4000, "Left"), -3.5);
+assert.equal(QLDM.lookupCalOffsetDb(perEarCal, 4000, "Right"), -5.5);
+
+const wLeft4k = QLDM.generateSoundWaveform({
+  centerHz: 4000,
+  sound: QLDM.SOUND_TONE,
+  levelSpl: 80.0,
+  sampleRate: 48000,
+  durationMs: 500,
+  rampMs: 20,
+  calTable: perEarCal,
+  ear: "Left"
+});
+const wRight4k = QLDM.generateSoundWaveform({
+  centerHz: 4000,
+  sound: QLDM.SOUND_TONE,
+  levelSpl: 80.0,
+  sampleRate: 48000,
+  durationMs: 500,
+  rampMs: 20,
+  calTable: perEarCal,
+  ear: "Right"
+});
+assert.equal(wLeft4k.ok, true);
+assert.equal(wRight4k.ok, true);
+/* Right ear rolls off 2.0 dB more at 4 kHz (-5.5 vs -3.5), so digital RMS must be +2.0 dB higher */
+const lrDiffDb = 20.0 * Math.log10(wRight4k.unrampedDigitalRms / wLeft4k.unrampedDigitalRms);
+assert.ok(Math.abs(lrDiffDb - 2.0) < 1e-6, `Expected +2.0 dB Right vs Left digital boost, got ${lrDiffDb}`);
+
+const exportedCalJson = QLDM.formatCalibrationJson(perEarCal, "2026-11-21T08:00:00Z");
+const importedCalRes = QLDM.parseImportedCalibrationJson(exportedCalJson);
+assert.equal(importedCalRes.ok, true);
+assert.equal(importedCalRes.calibration.perEarEnabled, true);
+assert.equal(QLDM.lookupCalOffsetDb(importedCalRes.calibration, 5656.8542, "Left"), -12.0);
+assert.equal(QLDM.lookupCalOffsetDb(importedCalRes.calibration, 5656.8542, "Right"), -15.0);
+
+/* Legacy v1.0.0 calibration JSON import retains -70.0 dBFS */
+const legacyImp = QLDM.parseImportedCalibrationJson(JSON.stringify({ offsetsDb: v1CalRaw.offsetsDb, name: "LegacyRig" }));
+assert.equal(legacyImp.ok, true);
+assert.equal(legacyImp.calibration.refDbfsRms60, -70.0);
+
+/* Missing frequency in Left ear is rejected on import */
+const brokenPerEar = JSON.parse(exportedCalJson);
+delete brokenPerEar.calibration.offsetsByEar.Left["4000"];
+const brokenImp = QLDM.parseImportedCalibrationJson(JSON.stringify(brokenPerEar));
+assert.equal(brokenImp.ok, false);
+
+/* 10b. Random seed generator range check */
+for (let k = 0; k < 20; k++) {
+  const sd = QLDM.generateRandomSeed();
+  assert.ok(Number.isInteger(sd) && sd >= 10000000 && sd <= 99999999);
+}
+
+/* 10c. Flexible qCLS_ELC CSV parser (_HHMM & browser duplicate suffix) */
+const sampleElcCsv = [
+  "Listener,Freq_Hz,CU,SPL_dB,HL_dB",
+  "HL012,1000,5,28.4,21.4",
+  "HL012,1000,50,96.2,89.2",
+  "HL012,4000,5,52.0,42.5",
+  "HL012,4000,50,101.5,92.0"
+].join("\n");
+const parsedElc = QLDM.parseQclsElcCsv(sampleElcCsv, "qCLS_ELC_HL012_L_20261121_1435 (1).csv");
+assert.equal(parsedElc.ok, true);
+assert.equal(parsedElc.participantId, "HL012");
+assert.equal(parsedElc.ear, "Left");
+assert.equal(parsedElc.cu5_1k, 28.4);
+assert.equal(parsedElc.ucl_4k, 101.5);
+
+/* 10d. Two-panel Results SVG plot */
+const svgSession = makeMockSession(777888).sess;
+const svgMarkup = QLDM.renderResultsSvg(svgSession);
+assert.ok(svgMarkup.startsWith("<svg ") && svgMarkup.endsWith("</svg>"));
+assert.ok(svgMarkup.includes("1 kHz Block") && svgMarkup.includes("4 kHz Block"));
+console.log(`[PASS v1.1.2 Booth Polish] Per-ear calibration & JSON import/export, random seeds, qCLS_ELC (_HHMM) parsing, & 2-panel Results SVG verified.`);
+
 console.log("\nALL qLDM ACCEPTANCE TESTS PASSED.");

@@ -73,7 +73,7 @@
         <li>Start at <code>1000.00 Hz</code>, click <strong>Play Continuous Tone</strong>, adjust your hardware output gain so the sound-level meter reads <code>80.0 dB SPL</code>, and lock the hardware volume.</li>
         <li>Step through each of the <strong>18 pure-tone component frequencies</strong> (<code>707.11 Hz</code> to <code>5656.85 Hz</code>). At each frequency, type the meter reading into <strong>Meter Reading (dB SPL)</strong> and click <strong>Apply to Freq</strong>. The tone updates immediately so you can verify the meter now reads within <code>&plusmn;0.2 dB</code> of <code>80.0 dB SPL</code>.</li>
         <li>Select the four <strong>Coupler Verification Complexes (5TC)</strong> at the bottom of the dropdown and confirm overall complex RMS in the coupler is within <code>&plusmn;1.0 dB</code> of nominal across levels, checking distortion at <code>100 dB SPL</code>.</li>
-        <li>Enter the transducer label and date, then click <strong>Save Coupler Calibration</strong>. Check the Pre-Session Headroom table on the main screen to confirm all stimuli show <code>OK</code> above <code>Max Output</code>.</li>
+        <li>Enter the transducer label and date, optionally enable <strong>Separate Left / Right receiver tables</strong> if your Left and Right insert receivers differ, click <strong>Export Cal JSON</strong> to archive a backup file of the coupler offsets, and click <strong>Save Coupler Calibration</strong>. Check the Pre-Session Headroom table on the main screen to confirm all stimuli show <code>OK</code> above <code>Max Output</code>.</li>
       </ol>
     </section>
 
@@ -98,11 +98,11 @@
         <li><strong>Listener Limits:</strong> Enter 1 kHz and 4 kHz <code>CU 5</code> and <code>Too Loud (CU 50)</code> values manually or click <strong>Import qCLS_ELC CSV</strong> to load them directly from the participant's qCLS equal-loudness contour file. Any fixed complex level below <code>CU 5 + 10 dB</code> or above <code>Too Loud</code> / <code>Max Output</code> is skipped and recorded in <code>LM_PSE</code> with its exact reason.</li>
         <li><strong>Ceiling Cap &amp; Bound Counts:</strong> When the varied sound reaches <code>Max Output</code> (or a ceiling lowered by <code>Too Loud</code>) on three consecutive trials, the match is flagged <code>AT_CEILING</code> (distinct from <code>AT_LIMIT_3_CONSEC</code> for the <code>&plusmn;20 dB</code> offset range and <code>10 dB</code> floor), and <code>LM_PSE</code> records both <code>n_at_ceiling</code> and <code>n_at_ceiling_fixed_louder</code> so downstream NEA inversion can treat capped matches as statistical bounds without excluding or repeating them.</li>
         <li><strong>In-Trial &ldquo;Too Loud&rdquo; Button:</strong> Always active during testing; immediately stops playback, lowers the session ceiling by <code>5 dB</code> for the remainder of the session, and ends any track whose fixed level exceeds the new ceiling.</li>
-        <li><strong>Three Downloads (Client-Side):</strong>
+        <li><strong>Three Downloads (Client-Side, One-Click &ldquo;Download All 3 Files&rdquo; or Individual):</strong>
           <ul>
-            <li><code>LM_PSE_[ID]_[L|R]_[YYYYMMDD].csv</code> — One row per match (<code>&Delta;</code>, tone PSE, curvature SE, shared block <code>&sigma;</code>, <code>n_at_ceiling</code>, <code>n_at_ceiling_fixed_louder</code>, track endpoints, flags, exclusion reasons).</li>
-            <li><code>LM_TBT_[ID]_[L|R]_[YYYYMMDD].csv</code> — Complete trial-by-trial log (block, pass, track, stimuli, levels, interval order, response, RT in ms, active ceiling).</li>
-            <li><code>LM_SES_[ID]_[L|R]_[YYYYMMDD].json</code> — Full provenance record (version, RNG seed, analog gain confirmation, digital reference &amp; full-scale 1 kHz SPL, sample rate, audio devices, exact component frequencies &amp; phases, coupler calibration table, headroom limits, and PSE summary).</li>
+            <li><code>LM_PSE_[ID]_[L|R]_[YYYYMMDD]_[HHMM].csv</code> — One row per match (<code>&Delta;</code>, tone PSE, curvature SE, shared block <code>&sigma;</code>, <code>n_at_ceiling</code>, <code>n_at_ceiling_fixed_louder</code>, track endpoints, flags, exclusion reasons).</li>
+            <li><code>LM_TBT_[ID]_[L|R]_[YYYYMMDD]_[HHMM].csv</code> — Complete trial-by-trial log (block, pass, track, stimuli, levels, interval order, response, RT in ms, active ceiling).</li>
+            <li><code>LM_SES_[ID]_[L|R]_[YYYYMMDD]_[HHMM].json</code> — Full provenance record (version, RNG seed, analog gain confirmation, digital reference &amp; full-scale 1 kHz SPL, sample rate, audio devices, exact component frequencies &amp; phases, coupler calibration table, headroom limits, and PSE summary).</li>
           </ul>
         </li>
       </ul>

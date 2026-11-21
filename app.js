@@ -46,6 +46,7 @@
     qclsElcFile: $("qcls-elc-file"),
     qclsImportStatus: $("qcls-import-status"),
     rngSeed: $("rng-seed"),
+    newSeedBtn: $("new-seed-btn"),
     startSessionBtn: $("start-session-btn"),
     savedSessionsSel: $("saved-sessions-sel"),
     loadSavedBtn: $("load-saved-btn"),
@@ -78,6 +79,7 @@
     tooLoudBtn: $("too-loud-btn"),
 
     resultsCard: $("results-card"),
+    dlAllBtn: $("dl-all-btn"),
     dlPseBtn: $("dl-pse-btn"),
     dlTbtBtn: $("dl-tbt-btn"),
     dlSesBtn: $("dl-ses-btn"),
@@ -85,6 +87,7 @@
     compFlagText: $("comp-flag-text"),
     compRepeatBtns: $("comp-repeat-btns"),
     resultsSummaryMeta: $("results-summary-meta"),
+    resultsPlotWrap: $("results-plot-wrap"),
     resultsTbody: $("results-tbody"),
 
     gainConfirmModal: $("gain-confirm-modal"),
@@ -115,6 +118,12 @@
     calTransducerName: $("cal-transducer-name"),
     calDateInput: $("cal-date-input"),
     calFullscaleReadout: $("cal-fullscale-readout"),
+    calPerEarChk: $("cal-per-ear-chk"),
+    calCopyEarBtn: $("cal-copy-ear-btn"),
+    calExportJsonBtn: $("cal-export-json-btn"),
+    calImportJsonBtn: $("cal-import-json-btn"),
+    calImportFile: $("cal-import-file"),
+    calEarColLbl: $("cal-ear-col-lbl"),
     calToneFreq: $("cal-tone-freq"),
     calToneSpl: $("cal-tone-spl"),
     calLvl30Btn: $("cal-lvl-30-btn"),
@@ -159,6 +168,19 @@
     const m = String(d.getMonth() + 1).padStart(2, "0");
     const day = String(d.getDate()).padStart(2, "0");
     return `${y}${m}${day}`;
+  }
+
+  function todayHm() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}${mm}`;
+  }
+
+  function randomizeSeedInput() {
+    if (dom.rngSeed) {
+      dom.rngSeed.value = String(QLDM.generateRandomSeed());
+    }
   }
 
   function todayIsoDate() {
@@ -327,13 +349,24 @@
   }
 
   function saveCalibrationState(state) {
+    const perEarEnabled = Boolean(state.perEarEnabled);
+    const baseOffsets = { ...state.offsetsDb };
+    const offsetsByEar = state.offsetsByEar && typeof state.offsetsByEar === "object"
+      ? {
+          Left: { ...(state.offsetsByEar.Left || baseOffsets) },
+          Right: { ...(state.offsetsByEar.Right || baseOffsets) }
+        }
+      : (perEarEnabled ? { Left: { ...baseOffsets }, Right: { ...baseOffsets } } : undefined);
+
     calState = {
       id: state.id || "custom",
       name: String(state.name || "Custom Transducer").trim(),
       couplerVerified: Boolean(state.couplerVerified),
       date: state.date || todayIsoDate(),
       refDbfsRms60: QLDM.clampRefDbfs60(state.refDbfsRms60),
-      offsetsDb: { ...state.offsetsDb }
+      perEarEnabled,
+      ...(offsetsByEar ? { offsetsByEar } : {}),
+      offsetsDb: perEarEnabled && offsetsByEar ? { ...offsetsByEar.Right } : baseOffsets
     };
     try {
       localStorage.setItem(CAL_STORAGE_KEY, JSON.stringify(calState));
@@ -358,11 +391,13 @@
   }
 
   function renderCalibrationStatusBanner() {
-    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const activeEar = dom.testEar.value === "Left" ? "Left" : "Right";
+    const fsInfo = QLDM.computeFullScale1kSpl(calState, null, activeEar);
     const fsNote = audioCtx && audioCtx.sampleRate !== QLDM.DEFAULT_FS
       ? ` &bull; Audio clock: ${audioCtx.sampleRate} Hz`
       : "";
-    const refNote = ` &bull; Ref: <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS</code> = 60 dB SPL (1 kHz 0 dBFS = <code>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</code>)`;
+    const earModeTag = calState.perEarEnabled ? ` [${activeEar} table]` : "";
+    const refNote = ` &bull; Ref: <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS</code> = 60 dB SPL (1 kHz 0 dBFS = <code>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</code>)${earModeTag}`;
     if (calState.couplerVerified) {
       dom.calStatusBanner.className = "banner banner-ok";
       dom.calStatusText.innerHTML =
@@ -379,13 +414,38 @@
   /* Working draft while the calibration modal is open */
   let modalCalDraft = null;
 
+  function getModalActiveEar() {
+    return dom.calToneEar && dom.calToneEar.value === "Left" ? "Left" : "Right";
+  }
+
+  function ensureDraftEarMaps() {
+    if (!modalCalDraft) return;
+    if (!modalCalDraft.offsetsByEar || typeof modalCalDraft.offsetsByEar !== "object") {
+      modalCalDraft.offsetsByEar = {
+        Left: { ...modalCalDraft.offsetsDb },
+        Right: { ...modalCalDraft.offsetsDb }
+      };
+    }
+  }
+
+  function getDraftEditableOffsetsMap() {
+    if (!modalCalDraft) return {};
+    if (modalCalDraft.perEarEnabled) {
+      ensureDraftEarMaps();
+      return modalCalDraft.offsetsByEar[getModalActiveEar()];
+    }
+    return modalCalDraft.offsetsDb;
+  }
+
   function renderModalFullScaleReadout() {
     if (!modalCalDraft) return;
-    const info = QLDM.computeFullScale1kSpl(modalCalDraft);
+    const ear = getModalActiveEar();
+    const info = QLDM.computeFullScale1kSpl(modalCalDraft, null, ear);
     const gainSign = info.gainAboveQclsDb >= 0 ? "+" : "";
+    const earTag = modalCalDraft.perEarEnabled ? ` (${ear} Receiver)` : "";
     dom.calFullscaleReadout.innerHTML =
       `<div>` +
-      `<strong>Nominal Full-Scale (0 dBFS peak) 1 kHz Tone:</strong> <code>${info.fullScale1kSpl.toFixed(1)} dB SPL</code> &bull; ` +
+      `<strong>Nominal Full-Scale (0 dBFS peak) 1 kHz Tone${escapeHtml(earTag)}:</strong> <code>${info.fullScale1kSpl.toFixed(1)} dB SPL</code> &bull; ` +
       `<strong>Digital Ref:</strong> <code>${info.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</code> &bull; ` +
       `<strong>Analog Gain vs. qCLS (&minus;40 dBFS):</strong> <code>${gainSign}${info.gainAboveQclsDb.toFixed(1)} dB</code>` +
       `</div>`;
@@ -426,9 +486,21 @@
     dom.calTableTbody.innerHTML = "";
     dom.calSaveErr.style.display = "none";
 
+    const activeEar = getModalActiveEar();
+    const otherEar = activeEar === "Left" ? "Right" : "Left";
+    if (dom.calEarColLbl) {
+      dom.calEarColLbl.textContent = modalCalDraft.perEarEnabled
+        ? `Sensitivity Offset — ${activeEar} Ear (dB re Nominal)`
+        : "Sensitivity Offset (dB re Nominal)";
+    }
+    if (dom.calCopyEarBtn) {
+      dom.calCopyEarBtn.style.display = modalCalDraft.perEarEnabled ? "inline-block" : "none";
+      dom.calCopyEarBtn.textContent = `Copy ${otherEar} → ${activeEar}`;
+    }
+
     for (const f of QLDM.CALIBRATION_FREQS) {
       const key = String(f);
-      const off = QLDM.lookupCalOffsetDb(modalCalDraft, f);
+      const off = QLDM.lookupCalOffsetDb(modalCalDraft, f, activeEar);
       const hasVal = Number.isFinite(off);
       const boost = hasVal ? -off : NaN;
       const tr = document.createElement("tr");
@@ -451,16 +523,20 @@
       inp.addEventListener("input", () => {
         const k = inp.getAttribute("data-cal-freq");
         const raw = inp.value.trim();
+        const targetMap = getDraftEditableOffsetsMap();
         const boostCell = dom.calTableTbody.querySelector(`[data-boost-for="${k}"]`);
         if (raw === "" || !Number.isFinite(Number(raw))) {
-          delete modalCalDraft.offsetsDb[k];
+          delete targetMap[k];
           if (boostCell) {
             boostCell.textContent = "MISSING";
             boostCell.style.color = "#b91c1c";
           }
         } else {
           const v = Number(raw);
-          modalCalDraft.offsetsDb[k] = Number(v.toFixed(2));
+          targetMap[k] = Number(v.toFixed(2));
+          if (modalCalDraft.perEarEnabled && getModalActiveEar() === "Right") {
+            modalCalDraft.offsetsDb[k] = targetMap[k];
+          }
           if (boostCell) {
             const b = -v;
             boostCell.textContent = `${b >= 0 ? "+" : ""}${b.toFixed(1)} dB`;
@@ -477,12 +553,23 @@
 
   function openCalibrationModal() {
     stopAllAudio();
+    const perEar = Boolean(calState.perEarEnabled);
     modalCalDraft = {
       id: calState.id || "custom",
       name: calState.name || "Etymotic ER-3A",
       couplerVerified: calState.couplerVerified,
       date: (/^\d{4}-\d{2}-\d{2}$/.test(calState.date) ? calState.date : todayIsoDate()),
       refDbfsRms60: QLDM.clampRefDbfs60(calState.refDbfsRms60),
+      perEarEnabled: perEar,
+      offsetsByEar: calState.offsetsByEar
+        ? {
+            Left: { ...(calState.offsetsByEar.Left || calState.offsetsDb) },
+            Right: { ...(calState.offsetsByEar.Right || calState.offsetsDb) }
+          }
+        : {
+            Left: { ...calState.offsetsDb },
+            Right: { ...calState.offsetsDb }
+          },
       offsetsDb: { ...calState.offsetsDb }
     };
     dom.calPresetSel.value = QLDM.TRANSDUCER_PRESETS[modalCalDraft.id] ? modalCalDraft.id : "er3a_nominal";
@@ -490,6 +577,7 @@
     dom.calTransducerName.value = modalCalDraft.name;
     dom.calDateInput.value = modalCalDraft.date;
     dom.calToneEar.value = dom.testEar.value;
+    dom.calPerEarChk.checked = perEar;
     dom.calMeasuredSpl.value = "";
     dom.calToneReadout.textContent = "Tone stopped.";
     dom.calSaveErr.style.display = "none";
@@ -551,6 +639,7 @@
       durationMs: 12000,
       rampMs: 20,
       calTable: activeCal,
+      ear,
       ceilingSpl: QLDM.EQUIPMENT_MAX_SPL
     });
 
@@ -604,12 +693,17 @@
       return;
     }
 
-    const curOffRaw = QLDM.lookupCalOffsetDb(modalCalDraft, freqHz);
+    const activeEar = getModalActiveEar();
+    const curOffRaw = QLDM.lookupCalOffsetDb(modalCalDraft, freqHz, activeEar);
     const curOff = Number.isFinite(curOffRaw) ? curOffRaw : 0.0;
     const updatedOff = Number((curOff + (measSpl - nomSpl)).toFixed(2));
     const exactKey = QLDM.CALIBRATION_FREQS.find((f) => Math.abs(f - freqHz) < 0.01);
     if (exactKey !== undefined) {
-      modalCalDraft.offsetsDb[String(exactKey)] = updatedOff;
+      const targetMap = getDraftEditableOffsetsMap();
+      targetMap[String(exactKey)] = updatedOff;
+      if (modalCalDraft.perEarEnabled && activeEar === "Right") {
+        modalCalDraft.offsetsDb[String(exactKey)] = updatedOff;
+      }
     }
     modalCalDraft.id = "custom_coupler";
     renderModalFullScaleReadout();
@@ -617,8 +711,9 @@
     if (isCalPlaying) {
       startCalibrationTone();
     } else {
+      const earNote = modalCalDraft.perEarEnabled ? ` (${activeEar} ear)` : "";
       dom.calToneReadout.innerHTML =
-        `Updated <strong>${freqHz.toFixed(2)} Hz</strong> offset to <code>${updatedOff.toFixed(1)} dB</code> ` +
+        `Updated <strong>${freqHz.toFixed(2)} Hz</strong>${escapeHtml(earNote)} offset to <code>${updatedOff.toFixed(1)} dB</code> ` +
         `(digital boost <code>${(-updatedOff >= 0 ? "+" : "") + (-updatedOff).toFixed(1)} dB</code>). Play again to verify meter reads ${nomSpl.toFixed(1)} dB SPL.`;
     }
   }
@@ -688,7 +783,7 @@
   function renderIdlePreview() {
     const cfg = readSetupSettings();
     const fs = audioCtx ? audioCtx.sampleRate : QLDM.DEFAULT_FS;
-    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const fsInfo = QLDM.computeFullScale1kSpl(calState, null, cfg.ear);
     const gainSign = fsInfo.gainAboveQclsDb >= 0 ? "+" : "";
 
     if (dom.idleRefSummary) {
@@ -703,7 +798,8 @@
     const headroom = QLDM.computeMaxUnclippedLevels(calState, {
       durationMs: cfg.durationMs,
       rampMs: cfg.rampMs,
-      sampleRate: fs
+      sampleRate: fs,
+      ear: cfg.ear
     });
 
     const needQoct = cfg.matchSet === "extended";
@@ -786,50 +882,29 @@
    * Optional Import of qCLS Equal-Loudness Contour CSV (qCLS_ELC_*.csv)
    * ------------------------------------------------------------------------- */
   function handleQclsCsvText(csvText, filename) {
-    const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    if (lines.length < 2) return;
-
-    let cu5_1k = null, ucl_1k = null, cu5_4k = null, ucl_4k = null;
-    for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(",").map((c) => c.trim());
-      if (cols.length < 4) continue;
-      const freq = Number(cols[1]);
-      const cu = Number(cols[2]);
-      const spl = Number(cols[3]);
-      if (!Number.isFinite(freq) || !Number.isFinite(cu) || !Number.isFinite(spl)) continue;
-      if (Math.abs(freq - 1000) < 1) {
-        if (Math.abs(cu - 5) < 0.5) cu5_1k = spl;
-        if (Math.abs(cu - 50) < 0.5) ucl_1k = spl;
-      } else if (Math.abs(freq - 4000) < 1) {
-        if (Math.abs(cu - 5) < 0.5) cu5_4k = spl;
-        if (Math.abs(cu - 50) < 0.5) ucl_4k = spl;
-      }
-    }
-
-    if (cu5_1k === null && cu5_4k === null && ucl_1k === null && ucl_4k === null) {
+    const parsed = QLDM.parseQclsElcCsv(csvText, filename);
+    if (!parsed.ok) {
       dom.qclsImportStatus.style.display = "block";
       dom.qclsImportStatus.style.color = "#b91c1c";
-      dom.qclsImportStatus.textContent = `Could not find 1000/4000 Hz CU 5 / CU 50 rows in ${filename}. Expected qCLS_ELC_*.csv.`;
+      dom.qclsImportStatus.textContent = parsed.error || `Failed to parse ${filename}.`;
       return;
     }
 
-    if (cu5_1k !== null) dom.cu5_1k.value = cu5_1k.toFixed(1);
-    if (ucl_1k !== null) dom.ucl_1k.value = ucl_1k.toFixed(1);
-    if (cu5_4k !== null) dom.cu5_4k.value = cu5_4k.toFixed(1);
-    if (ucl_4k !== null) dom.ucl_4k.value = ucl_4k.toFixed(1);
+    if (parsed.cu5_1k !== null) dom.cu5_1k.value = parsed.cu5_1k.toFixed(1);
+    if (parsed.ucl_1k !== null) dom.ucl_1k.value = parsed.ucl_1k.toFixed(1);
+    if (parsed.cu5_4k !== null) dom.cu5_4k.value = parsed.cu5_4k.toFixed(1);
+    if (parsed.ucl_4k !== null) dom.ucl_4k.value = parsed.ucl_4k.toFixed(1);
 
-    const m = /^qCLS_ELC_(.+)_([LR])_(\d{8})\.csv$/i.exec(filename);
-    if (m) {
-      dom.participantId.value = m[1];
-      dom.testEar.value = m[2].toUpperCase() === "L" ? "Left" : "Right";
-    }
+    if (parsed.participantId) dom.participantId.value = parsed.participantId;
+    if (parsed.ear) dom.testEar.value = parsed.ear;
 
     importedQclsFilename = filename;
     dom.qclsImportStatus.style.display = "block";
     dom.qclsImportStatus.style.color = "#0369a1";
     dom.qclsImportStatus.textContent =
-      `Imported limits from ${filename}: 1k [CU5=${cu5_1k !== null ? cu5_1k.toFixed(1) : "--"}, CU50=${ucl_1k !== null ? ucl_1k.toFixed(1) : "--"}], ` +
-      `4k [CU5=${cu5_4k !== null ? cu5_4k.toFixed(1) : "--"}, CU50=${ucl_4k !== null ? ucl_4k.toFixed(1) : "--"}] dB SPL.`;
+      `Imported limits from ${filename}: 1k [CU5=${parsed.cu5_1k !== null ? parsed.cu5_1k.toFixed(1) : "--"}, CU50=${parsed.ucl_1k !== null ? parsed.ucl_1k.toFixed(1) : "--"}], ` +
+      `4k [CU5=${parsed.cu5_4k !== null ? parsed.cu5_4k.toFixed(1) : "--"}, CU50=${parsed.ucl_4k !== null ? parsed.ucl_4k.toFixed(1) : "--"}] dB SPL.`;
+    renderCalibrationStatusBanner();
     renderIdlePreview();
   }
 
@@ -837,10 +912,12 @@
    * Operator Analog Gain Confirmation Gate (Follow-up Request 1.4)
    * ------------------------------------------------------------------------- */
   function openGainConfirmationModal(onConfirmed) {
-    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const activeEar = dom.testEar.value === "Left" ? "Left" : "Right";
+    const fsInfo = QLDM.computeFullScale1kSpl(calState, null, activeEar);
     const gainSign = fsInfo.gainAboveQclsDb >= 0 ? "+" : "";
+    const earCalNote = calState.perEarEnabled ? ` (${activeEar} receiver calibration)` : "";
     dom.gainConfirmDetails.innerHTML =
-      `<strong>Active Transducer:</strong> ${escapeHtml(calState.name)}<br>` +
+      `<strong>Active Transducer:</strong> ${escapeHtml(calState.name)}${escapeHtml(earCalNote)}<br>` +
       `<strong>qLDM Digital Reference:</strong> <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</code><br>` +
       `<strong>Analog Gain Relative to qCLS:</strong> <code>${gainSign}${fsInfo.gainAboveQclsDb.toFixed(1)} dB</code><br>` +
       `<strong>Nominal Full-Scale (0 dBFS) 1 kHz Tone:</strong> <code>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</code>`;
@@ -916,18 +993,21 @@
       )
     );
 
-    const headroom = QLDM.computeMaxUnclippedLevels(calState, {
+    const resolvedEarCal = QLDM.resolveCalForEar(calState, cfg.ear);
+    const headroom = QLDM.computeMaxUnclippedLevels(resolvedEarCal, {
       durationMs: cfg.durationMs,
       rampMs: cfg.rampMs,
-      sampleRate: fs
+      sampleRate: fs,
+      ear: cfg.ear
     });
-    const fsInfo = QLDM.computeFullScale1kSpl(calState);
+    const fsInfo = QLDM.computeFullScale1kSpl(resolvedEarCal, null, cfg.ear);
 
     session = {
       sessionId: `QLDM_${Date.now()}`,
       appVersion: QLDM.APP_VERSION,
       createdAtIso: new Date().toISOString(),
       dateYmd: todayYmd(),
+      timeHm: todayHm(),
       participantId: cfg.participantId,
       ear: cfg.ear,
       earCode: cfg.earCode,
@@ -945,11 +1025,11 @@
         outputDevices
       },
       calibration: {
-        ...calState,
+        ...resolvedEarCal,
         refDbfsRms60: fsInfo.refDbfsRms60,
         fullScale1kSpl: fsInfo.fullScale1kSpl,
         gainAboveQclsDb: fsInfo.gainAboveQclsDb,
-        offsetsDb: { ...calState.offsetsDb },
+        offsetsDb: { ...resolvedEarCal.offsetsDb },
         maxUnclippedLevels: headroom
       },
       rngState: rng.getState(),
@@ -1333,6 +1413,7 @@
       rampMs: session.settings.rampMs,
       gapMs: session.settings.gapMs,
       calTable: session.calibration,
+      ear: session.ear,
       ceilingSpl: session.ceilingSpl
     });
 
@@ -1625,6 +1706,10 @@
       dom.compFlagBanner.style.display = "none";
     }
 
+    if (dom.resultsPlotWrap) {
+      dom.resultsPlotWrap.innerHTML = QLDM.renderResultsSvg(session);
+    }
+
     dom.resultsTbody.innerHTML = "";
     for (const r of rows) {
       const tr = document.createElement("tr");
@@ -1669,9 +1754,23 @@
     }
   }
 
+  function resolveSessionHm(sess) {
+    if (sess && sess.timeHm && /^\d{4}$/.test(String(sess.timeHm))) {
+      return String(sess.timeHm);
+    }
+    if (sess && sess.createdAtIso) {
+      const dt = new Date(sess.createdAtIso);
+      if (!Number.isNaN(dt.getTime())) {
+        return String(dt.getHours()).padStart(2, "0") + String(dt.getMinutes()).padStart(2, "0");
+      }
+    }
+    return todayHm();
+  }
+
   function exportFilename(prefix, ext) {
     if (!session) return `${prefix}_UNKNOWN.${ext}`;
-    return `${prefix}_${session.participantId}_${session.earCode}_${session.dateYmd}.${ext}`;
+    const hm = resolveSessionHm(session);
+    return `${prefix}_${session.participantId}_${session.earCode}_${session.dateYmd}_${hm}.${ext}`;
   }
 
   /* -------------------------------------------------------------------------
@@ -1697,6 +1796,19 @@
     previewInputs.forEach((el) => {
       el.addEventListener("input", renderIdlePreview);
       el.addEventListener("change", renderIdlePreview);
+    });
+
+    dom.testEar.addEventListener("change", () => {
+      renderCalibrationStatusBanner();
+      renderIdlePreview();
+    });
+
+    dom.participantId.addEventListener("change", () => {
+      randomizeSeedInput();
+    });
+
+    dom.newSeedBtn.addEventListener("click", () => {
+      randomizeSeedInput();
     });
 
     /* qCLS ELC CSV Import */
@@ -1728,7 +1840,8 @@
 
     dom.gainConfirmOkBtn.addEventListener("click", () => {
       if (!dom.gainConfirmChk.checked) return;
-      const fsInfo = QLDM.computeFullScale1kSpl(calState);
+      const activeEar = dom.testEar.value === "Left" ? "Left" : "Right";
+      const fsInfo = QLDM.computeFullScale1kSpl(calState, null, activeEar);
       const confirmRecord = {
         confirmed: true,
         confirmed_at_iso: new Date().toISOString(),
@@ -1855,6 +1968,18 @@
     });
 
     /* Export Downloads */
+    dom.dlAllBtn.addEventListener("click", () => {
+      if (!session) return;
+      triggerDownload(QLDM.formatPseCsv(session), exportFilename("LM_PSE", "csv"), "text/csv;charset=utf-8");
+      setTimeout(() => {
+        if (!session) return;
+        triggerDownload(QLDM.formatTbtCsv(session), exportFilename("LM_TBT", "csv"), "text/csv;charset=utf-8");
+      }, 130);
+      setTimeout(() => {
+        if (!session) return;
+        triggerDownload(QLDM.formatSesJson(session), exportFilename("LM_SES", "json"), "application/json;charset=utf-8");
+      }, 260);
+    });
     dom.dlPseBtn.addEventListener("click", () => {
       if (!session) return;
       triggerDownload(QLDM.formatPseCsv(session), exportFilename("LM_PSE", "csv"), "text/csv;charset=utf-8");
@@ -1873,13 +1998,95 @@
     dom.bannerCalBtn.addEventListener("click", openCalibrationModal);
     dom.calCloseBtn.addEventListener("click", closeCalibrationModal);
 
+    dom.calPerEarChk.addEventListener("change", () => {
+      if (!modalCalDraft) return;
+      modalCalDraft.perEarEnabled = Boolean(dom.calPerEarChk.checked);
+      ensureDraftEarMaps();
+      renderModalFullScaleReadout();
+      renderCalModalTable();
+      if (isCalPlaying) startCalibrationTone();
+    });
+
+    dom.calCopyEarBtn.addEventListener("click", () => {
+      if (!modalCalDraft || !modalCalDraft.perEarEnabled) return;
+      ensureDraftEarMaps();
+      const activeEar = getModalActiveEar();
+      const otherEar = activeEar === "Left" ? "Right" : "Left";
+      modalCalDraft.offsetsByEar[activeEar] = { ...modalCalDraft.offsetsByEar[otherEar] };
+      if (activeEar === "Right") {
+        modalCalDraft.offsetsDb = { ...modalCalDraft.offsetsByEar.Right };
+      }
+      renderModalFullScaleReadout();
+      renderCalModalTable();
+      if (isCalPlaying) startCalibrationTone();
+    });
+
+    dom.calExportJsonBtn.addEventListener("click", () => {
+      if (!modalCalDraft) return;
+      modalCalDraft.refDbfsRms60 = QLDM.clampRefDbfs60(dom.calRefDbfs.value);
+      modalCalDraft.name = dom.calTransducerName.value.trim() || "Custom Transducer";
+      modalCalDraft.date = dom.calDateInput.value || todayIsoDate();
+      const safeName = sanitizeId(modalCalDraft.name).slice(0, 28);
+      const fname = `qLDM_CAL_${safeName}_${todayYmd()}_${todayHm()}.json`;
+      triggerDownload(QLDM.formatCalibrationJson(modalCalDraft), fname, "application/json;charset=utf-8");
+    });
+
+    dom.calImportJsonBtn.addEventListener("click", () => {
+      dom.calImportFile.click();
+    });
+
+    dom.calImportFile.addEventListener("change", (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const res = QLDM.parseImportedCalibrationJson(String(reader.result || ""));
+        if (!res.ok) {
+          dom.calSaveErr.style.display = "block";
+          dom.calSaveErr.textContent = `Import failed: ${res.error}`;
+          return;
+        }
+        const imp = res.calibration;
+        modalCalDraft = {
+          ...imp,
+          date: (/^\d{4}-\d{2}-\d{2}$/.test(imp.date) ? imp.date : todayIsoDate()),
+          perEarEnabled: Boolean(imp.perEarEnabled),
+          offsetsByEar: imp.offsetsByEar
+            ? { Left: { ...imp.offsetsByEar.Left }, Right: { ...imp.offsetsByEar.Right } }
+            : { Left: { ...imp.offsetsDb }, Right: { ...imp.offsetsDb } },
+          offsetsDb: { ...imp.offsetsDb }
+        };
+        dom.calRefDbfs.value = modalCalDraft.refDbfsRms60.toFixed(1);
+        dom.calTransducerName.value = modalCalDraft.name;
+        dom.calDateInput.value = modalCalDraft.date;
+        dom.calPerEarChk.checked = modalCalDraft.perEarEnabled;
+        dom.calSaveErr.style.display = "none";
+        dom.calToneReadout.innerHTML =
+          `<span style="color:#0369a1; font-weight:700;">Imported calibration from ${escapeHtml(file.name)} (${modalCalDraft.refDbfsRms60.toFixed(1)} dBFS @ 60 dB SPL). Click Save Coupler Calibration to apply.</span>`;
+        renderModalFullScaleReadout();
+        renderCalModalTable();
+        if (isCalPlaying) startCalibrationTone();
+      };
+      reader.readAsText(file);
+      ev.target.value = "";
+    });
+
     dom.calPresetSel.addEventListener("change", () => {
       if (!modalCalDraft) return;
       const preset = cloneCalPreset(dom.calPresetSel.value, modalCalDraft.refDbfsRms60);
       modalCalDraft.id = preset.id;
       modalCalDraft.name = preset.name;
       modalCalDraft.couplerVerified = false;
-      modalCalDraft.offsetsDb = { ...preset.offsetsDb };
+      if (modalCalDraft.perEarEnabled) {
+        ensureDraftEarMaps();
+        modalCalDraft.offsetsByEar[getModalActiveEar()] = { ...preset.offsetsDb };
+      } else {
+        modalCalDraft.offsetsDb = { ...preset.offsetsDb };
+        modalCalDraft.offsetsByEar = {
+          Left: { ...preset.offsetsDb },
+          Right: { ...preset.offsetsDb }
+        };
+      }
       dom.calTransducerName.value = modalCalDraft.name;
       renderModalFullScaleReadout();
       renderCalModalTable();
@@ -1920,6 +2127,10 @@
       if (isCalPlaying) startCalibrationTone();
     });
     dom.calToneEar.addEventListener("change", () => {
+      if (modalCalDraft && modalCalDraft.perEarEnabled) {
+        renderModalFullScaleReadout();
+        renderCalModalTable();
+      }
       if (isCalPlaying) startCalibrationTone();
     });
 
@@ -1936,14 +2147,18 @@
 
     dom.calSaveBtn.addEventListener("click", () => {
       if (!modalCalDraft) return;
-      const missingFreqs = QLDM.CALIBRATION_FREQS.filter(
-        (f) => !Number.isFinite(QLDM.lookupCalOffsetDb(modalCalDraft, f))
-      );
-      if (missingFreqs.length > 0) {
-        dom.calSaveErr.style.display = "block";
-        dom.calSaveErr.textContent =
-          `Cannot save: missing calibration offset for ${missingFreqs.map((f) => f.toFixed(2) + " Hz").join(", ")}.`;
-        return;
+      const earsToCheck = modalCalDraft.perEarEnabled ? ["Left", "Right"] : [null];
+      for (const earKey of earsToCheck) {
+        const missingFreqs = QLDM.CALIBRATION_FREQS.filter(
+          (f) => !Number.isFinite(QLDM.lookupCalOffsetDb(modalCalDraft, f, earKey))
+        );
+        if (missingFreqs.length > 0) {
+          const earTag = earKey ? ` (${earKey} ear)` : "";
+          dom.calSaveErr.style.display = "block";
+          dom.calSaveErr.textContent =
+            `Cannot save: missing calibration offset${earTag} for ${missingFreqs.map((f) => f.toFixed(2) + " Hz").join(", ")}.`;
+          return;
+        }
       }
       modalCalDraft.refDbfsRms60 = QLDM.clampRefDbfs60(dom.calRefDbfs.value);
       modalCalDraft.name = dom.calTransducerName.value.trim() || "Custom Transducer";
@@ -1955,6 +2170,7 @@
   }
 
   function init() {
+    randomizeSeedInput();
     bindEvents();
     renderCalibrationStatusBanner();
     renderIdlePreview();

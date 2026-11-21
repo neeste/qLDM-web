@@ -120,8 +120,11 @@
       </div>
 
       <div class="field">
-        <label for="rng-seed">RNG Seed</label>
-        <input type="number" id="rng-seed" value="20261120" step="1">
+        <label for="rng-seed">RNG Seed (Auto-Randomized Per Session)</label>
+        <div style="display:flex; gap:6px;">
+          <input type="number" id="rng-seed" value="20261120" step="1" style="flex:1;">
+          <button type="button" id="new-seed-btn" class="btn btn-outline" style="padding:6px 10px; font-size:12px;" title="Generate a fresh random RNG seed">New Seed</button>
+        </div>
       </div>
 
       <button type="button" id="start-session-btn" class="btn btn-primary" style="width:100%; margin-top:6px; padding:12px;">
@@ -206,9 +209,10 @@
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
           <h2 style="margin:0; border:none; padding:0;">Loudness-Matching Results (&Delta; = Tone PSE &minus; Complex Level)</h2>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button type="button" id="dl-pse-btn" class="btn btn-primary">Download Matches (LM_PSE CSV)</button>
-            <button type="button" id="dl-tbt-btn" class="btn btn-primary">Download Trials (LM_TBT CSV)</button>
-            <button type="button" id="dl-ses-btn" class="btn btn-outline">Download Session (LM_SES JSON)</button>
+            <button type="button" id="dl-all-btn" class="btn btn-gold">Download All 3 Files</button>
+            <button type="button" id="dl-pse-btn" class="btn btn-primary">Matches (LM_PSE CSV)</button>
+            <button type="button" id="dl-tbt-btn" class="btn btn-primary">Trials (LM_TBT CSV)</button>
+            <button type="button" id="dl-ses-btn" class="btn btn-outline">Session (LM_SES JSON)</button>
           </div>
         </div>
 
@@ -219,6 +223,7 @@
         </div>
 
         <div id="results-summary-meta" class="muted-note" style="margin-bottom:10px;"></div>
+        <div id="results-plot-wrap" style="margin-bottom:14px;"></div>
         <div style="overflow-x:auto;">
           <table class="data-table" id="results-table">
             <thead>
@@ -343,7 +348,22 @@
         </div>
       </div>
 
-      <div id="cal-fullscale-readout" class="banner banner-info" style="margin:6px 0 10px; padding:9px 12px; font-size:13px;"></div>
+      <div id="cal-fullscale-readout" class="banner banner-info" style="margin:6px 0 8px; padding:9px 12px; font-size:13px;"></div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin:4px 0 8px;">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label class="check-row" style="margin:0;">
+            <input type="checkbox" id="cal-per-ear-chk">
+            <span><strong>Separate Left / Right receiver tables</strong> (switches with Output Channel)</span>
+          </label>
+          <button type="button" id="cal-copy-ear-btn" class="btn btn-outline" style="padding:4px 9px; font-size:12px; display:none;">Copy Other Ear &rarr; Active</button>
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <button type="button" id="cal-export-json-btn" class="btn btn-outline" style="padding:5px 10px; font-size:12px;">Export Cal JSON</button>
+          <button type="button" id="cal-import-json-btn" class="btn btn-outline" style="padding:5px 10px; font-size:12px;">Import Cal JSON</button>
+          <input type="file" id="cal-import-file" accept=".json,application/json" hidden>
+        </div>
+      </div>
 
       <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:7px; padding:12px; margin:10px 0;">
         <div style="display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap;">
@@ -382,7 +402,7 @@
             <tr>
               <th>Component Freq (Hz)</th>
               <th>Used In</th>
-              <th>Sensitivity Offset (dB re Nominal)</th>
+              <th id="cal-ear-col-lbl">Sensitivity Offset (dB re Nominal)</th>
               <th>Digital Boost Applied (dB)</th>
             </tr>
           </thead>

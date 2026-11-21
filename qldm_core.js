@@ -12,7 +12,7 @@
 (function (global) {
   "use strict";
 
-  const APP_VERSION = "1.1.1";
+  const APP_VERSION = "1.1.2";
   const DEFAULT_FS = 48000;
 
   /*
@@ -162,15 +162,39 @@
   };
 
   /*
+   * Resolve ear-specific calibration map when perEarEnabled is active, while
+   * keeping backward-compatible single-map calTable.offsetsDb behavior by default.
+   */
+  function resolveCalForEar(calTable, ear = null) {
+    if (!calTable || typeof calTable !== "object") return calTable;
+    const earKey = ear === "Left" ? "Left" : ear === "Right" ? "Right" : null;
+    if (
+      calTable.perEarEnabled &&
+      earKey &&
+      calTable.offsetsByEar &&
+      calTable.offsetsByEar[earKey] &&
+      typeof calTable.offsetsByEar[earKey] === "object"
+    ) {
+      return {
+        ...calTable,
+        activeEar: earKey,
+        offsetsDb: { ...calTable.offsetsByEar[earKey] }
+      };
+    }
+    return calTable;
+  }
+
+  /*
    * Strict component calibration lookup:
    * Returns NaN if no table entry is within 2 Hz or if the value is missing/non-finite,
    * so an uncalibrated component is refused rather than silently treated as 0 dB.
    */
-  function lookupCalOffsetDb(calTable, freqHz) {
-    if (!calTable || !calTable.offsetsDb) return NaN;
+  function lookupCalOffsetDb(calTable, freqHz, ear = null) {
+    const resolved = resolveCalForEar(calTable, ear);
+    if (!resolved || !resolved.offsetsDb) return NaN;
     let bestKey = null;
     let bestDiff = Infinity;
-    for (const k of Object.keys(calTable.offsetsDb)) {
+    for (const k of Object.keys(resolved.offsetsDb)) {
       const fk = Number(k);
       if (!Number.isFinite(fk)) continue;
       const d = Math.abs(fk - freqHz);
@@ -180,7 +204,7 @@
       }
     }
     if (bestKey !== null && bestDiff < 2.0) {
-      const raw = calTable.offsetsDb[bestKey];
+      const raw = resolved.offsetsDb[bestKey];
       if (raw === null || raw === undefined || raw === "") return NaN;
       const v = Number(raw);
       return Number.isFinite(v) ? v : NaN;
@@ -193,9 +217,9 @@
    * under the active digital reference and 1-kHz calibration offset, plus the
    * analog hardware gain difference relative to qCLS (-40 dBFS RMS @ 60 dB SPL).
    */
-  function computeFullScale1kSpl(calTable, explicitRefDbfs) {
+  function computeFullScale1kSpl(calTable, explicitRefDbfs, ear = null) {
     const refDbfs = resolveRefDbfs60(calTable, explicitRefDbfs);
-    const off1k = lookupCalOffsetDb(calTable, 1000.0);
+    const off1k = lookupCalOffsetDb(calTable, 1000.0, ear);
     const offsetUsed = Number.isFinite(off1k) ? off1k : 0.0;
     const exactSpl = REF_SPL_DB - refDbfs - 20.0 * Math.log10(Math.SQRT2) + offsetUsed;
     return {
@@ -206,6 +230,18 @@
       exactFullScale1kSpl: exactSpl,
       hasValid1kCal: Number.isFinite(off1k)
     };
+  }
+
+  /* Generate a fresh 8-digit integer RNG seed [10000000..99999999] per new session */
+  function generateRandomSeed() {
+    try {
+      if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+        const arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        return 10000000 + (arr[0] % 90000000);
+      }
+    } catch (_e) { /* fall through */ }
+    return 10000000 + Math.floor(Math.random() * 90000000);
   }
 
   /* -------------------------------------------------------------------------
@@ -300,7 +336,7 @@
     const fs = Number(params.sampleRate || DEFAULT_FS);
     const durationMs = Number(params.durationMs ?? 500);
     const rampMs = Number(params.rampMs ?? 20);
-    const calTable = params.calTable || TRANSDUCER_PRESETS.flat_ref;
+    const calTable = resolveCalForEar(params.calTable || TRANSDUCER_PRESETS.flat_ref, params.ear);
     const refRms60 = resolveRefDigitalRms60(calTable, params.refDigitalRms60);
 
     if (!Number.isFinite(centerHz) || !Number.isFinite(levelSpl) || !(fs > 0) || !(durationMs > 0)) {
@@ -445,7 +481,7 @@
     const i0 = Math.min(nRamp, Math.floor(n / 4));
     const i1 = Math.max(i0 + 1, n - i0);
     const nMid = i1 - i0;
-    const calTable = opts.calTable || TRANSDUCER_PRESETS.flat_ref;
+    const calTable = resolveCalForEar(opts.calTable || TRANSDUCER_PRESETS.flat_ref, opts.ear);
     const refRms60 = resolveRefDigitalRms60(calTable, opts.refDigitalRms60);
     const compFreqs = opts.compFreqs || [];
 
@@ -502,7 +538,8 @@
     const durationMs = Number(opts.durationMs ?? 500);
     const rampMs = Number(opts.rampMs ?? 20);
     const fs = Number(opts.sampleRate || DEFAULT_FS);
-    const refRms60 = resolveRefDigitalRms60(calTable, opts.refDigitalRms60);
+    const resolvedCal = resolveCalForEar(calTable, opts.ear);
+    const refRms60 = resolveRefDigitalRms60(resolvedCal, opts.refDigitalRms60);
 
     const specs = [
       { label: "1 kHz Pure Tone", centerHz: 1000, sound: SOUND_TONE },
@@ -521,7 +558,7 @@
         sampleRate: fs,
         durationMs,
         rampMs,
-        calTable,
+        calTable: resolvedCal,
         refDigitalRms60: refRms60,
         ceilingSpl: 200.0
       });
@@ -571,6 +608,7 @@
       durationMs,
       rampMs,
       calTable: params.calTable,
+      ear: params.ear,
       refDigitalRms60: params.refDigitalRms60,
       ceilingSpl: params.ceilingSpl
     });
@@ -584,6 +622,7 @@
       durationMs,
       rampMs,
       calTable: params.calTable,
+      ear: params.ear,
       refDigitalRms60: params.refDigitalRms60,
       ceilingSpl: params.ceilingSpl
     });
@@ -1628,6 +1667,24 @@
     }
     const isV1 = String(sessionAppVersion || "") === "1.0.0" || !hasExplicitRefField(parsed);
     const refDbfsRms60 = isV1 ? LEGACY_V1_REF_DBFS_60DB : clampRefDbfs60(parsed.refDbfsRms60);
+    const baseOffsets = { ...parsed.offsetsDb };
+    const perEarEnabled = Boolean(parsed.perEarEnabled);
+    let offsetsByEar = undefined;
+    if (parsed.offsetsByEar && typeof parsed.offsetsByEar === "object") {
+      offsetsByEar = {
+        Left: parsed.offsetsByEar.Left && typeof parsed.offsetsByEar.Left === "object"
+          ? { ...parsed.offsetsByEar.Left }
+          : { ...baseOffsets },
+        Right: parsed.offsetsByEar.Right && typeof parsed.offsetsByEar.Right === "object"
+          ? { ...parsed.offsetsByEar.Right }
+          : { ...baseOffsets }
+      };
+    } else if (perEarEnabled) {
+      offsetsByEar = {
+        Left: { ...baseOffsets },
+        Right: { ...baseOffsets }
+      };
+    }
     return {
       ...parsed,
       id: parsed.id || "custom",
@@ -1635,8 +1692,262 @@
       couplerVerified: Boolean(parsed.couplerVerified),
       date: parsed.date || "LegacyV1",
       refDbfsRms60,
-      offsetsDb: { ...parsed.offsetsDb }
+      perEarEnabled,
+      ...(offsetsByEar ? { offsetsByEar } : {}),
+      offsetsDb: baseOffsets
     };
+  }
+
+  /*
+   * Export & Import Coupler Calibration JSON (protects measured 18-frequency coupler
+   * tables across browser storage clears, private tabs, or booth hardware backups).
+   */
+  function formatCalibrationJson(calTable, exportedAtIso = null) {
+    const norm = normalizeCalibrationRecord(calTable, APP_VERSION) || {
+      ...TRANSDUCER_PRESETS.er3a_nominal,
+      offsetsDb: { ...TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
+    };
+    const fsInfo = computeFullScale1kSpl(norm);
+    const payload = {
+      schema: "qLDM_calibration_v2",
+      app_name: "qLDM",
+      app_version: APP_VERSION,
+      exported_at_iso: exportedAtIso || new Date().toISOString(),
+      calibration: {
+        id: norm.id || "custom",
+        name: norm.name || "Custom Transducer",
+        couplerVerified: Boolean(norm.couplerVerified),
+        date: norm.date || "Reference",
+        refDbfsRms60: fsInfo.refDbfsRms60,
+        fullScale1kSpl: fsInfo.fullScale1kSpl,
+        gainAboveQclsDb: fsInfo.gainAboveQclsDb,
+        perEarEnabled: Boolean(norm.perEarEnabled),
+        ...(norm.offsetsByEar ? { offsetsByEar: norm.offsetsByEar } : {}),
+        offsetsDb: { ...norm.offsetsDb }
+      }
+    };
+    return JSON.stringify(payload, null, 2) + "\n";
+  }
+
+  function parseImportedCalibrationJson(jsonText) {
+    let raw = null;
+    try {
+      raw = JSON.parse(String(jsonText || ""));
+    } catch (_e) {
+      return { ok: false, error: "Invalid JSON file." };
+    }
+    if (!raw || typeof raw !== "object") {
+      return { ok: false, error: "Calibration JSON must be an object." };
+    }
+    const sessionVer = raw.app_version || raw.appVersion || null;
+    const calCandidate = (raw.calibration && typeof raw.calibration === "object") ? raw.calibration : raw;
+    const norm = normalizeCalibrationRecord(calCandidate, sessionVer);
+    if (!norm) {
+      return { ok: false, error: "No valid offsetsDb table found in JSON." };
+    }
+    const earsToCheck = norm.perEarEnabled ? ["Left", "Right"] : [null];
+    for (const ear of earsToCheck) {
+      const missing = CALIBRATION_FREQS.filter(f => !Number.isFinite(lookupCalOffsetDb(norm, f, ear)));
+      if (missing.length > 0) {
+        const earTag = ear ? ` (${ear} ear)` : "";
+        return {
+          ok: false,
+          error: `Missing calibration entries${earTag}: ${missing.map(f => f.toFixed(2) + " Hz").join(", ")}.`
+        };
+      }
+    }
+    return { ok: true, calibration: norm };
+  }
+
+  /*
+   * Parse qCLS Equal-Loudness Contour CSV (qCLS_ELC_*.csv) including filenames with
+   * optional _HHMM timestamps or browser duplicate suffixes such as " (1)".
+   */
+  function parseQclsElcCsv(csvText, filename = "") {
+    const lines = String(csvText || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) {
+      return { ok: false, error: "Empty CSV file." };
+    }
+    let cu5_1k = null, ucl_1k = null, cu5_4k = null, ucl_4k = null;
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(",").map(c => c.trim());
+      if (cols.length < 4) continue;
+      const freq = Number(cols[1]);
+      const cu = Number(cols[2]);
+      const spl = Number(cols[3]);
+      if (!Number.isFinite(freq) || !Number.isFinite(cu) || !Number.isFinite(spl)) continue;
+      if (Math.abs(freq - 1000) < 1) {
+        if (Math.abs(cu - 5) < 0.5) cu5_1k = spl;
+        if (Math.abs(cu - 50) < 0.5) ucl_1k = spl;
+      } else if (Math.abs(freq - 4000) < 1) {
+        if (Math.abs(cu - 5) < 0.5) cu5_4k = spl;
+        if (Math.abs(cu - 50) < 0.5) ucl_4k = spl;
+      }
+    }
+    if (cu5_1k === null && cu5_4k === null && ucl_1k === null && ucl_4k === null) {
+      return {
+        ok: false,
+        error: `Could not find 1000/4000 Hz CU 5 / CU 50 rows in ${filename || "CSV"}. Expected qCLS_ELC_*.csv.`
+      };
+    }
+
+    let participantId = null;
+    let ear = null;
+    const baseName = String(filename || "").replace(/^.*[\\/]/, "");
+    const m = /^qCLS_ELC_(.+?)_([LRB])_(\d{8})(?:_\d{4,6})?(?:\s*\(\d+\))?\.csv$/i.exec(baseName);
+    if (m) {
+      participantId = m[1];
+      const ec = m[2].toUpperCase();
+      if (ec === "L") ear = "Left";
+      else if (ec === "R") ear = "Right";
+    }
+
+    return {
+      ok: true,
+      cu5_1k,
+      ucl_1k,
+      cu5_4k,
+      ucl_4k,
+      participantId,
+      ear
+    };
+  }
+
+  /*
+   * Pure two-panel (1000 Hz & 4000 Hz) SVG plot of Delta = Tone PSE - Complex Level (dB)
+   * vs. Fixed Level (dB SPL) with +/- Fit SE bars, 0-dB reference, and shaded <= compFlagDb zone.
+   */
+  function renderResultsSvg(sess) {
+    if (!sess) return "";
+    const rows = collectSessionPseRows(sess);
+    const valid = rows.filter(r => !r.leftOutReason && r.deltaDb !== null && Number.isFinite(r.deltaDb));
+    const compFlagDb = Number(sess.settings?.compFlagDb ?? -6.0);
+
+    let yMin = Math.min(-10.0, compFlagDb - 3.0);
+    let yMax = 14.0;
+    for (const r of valid) {
+      const se = Number.isFinite(r.seDb) ? r.seDb : 0.0;
+      if (r.deltaDb - se - 1.5 < yMin) yMin = Math.floor((r.deltaDb - se - 1.5) / 2) * 2;
+      if (r.deltaDb + se + 1.5 > yMax) yMax = Math.ceil((r.deltaDb + se + 1.5) / 2) * 2;
+    }
+    yMin = Math.max(-24, yMin);
+    yMax = Math.min(26, yMax);
+
+    const W = 760, H = 248;
+    const padTop = 32, padBot = 40, padLeft = 48, padRight = 18, midGap = 46;
+    const pW = Math.floor((W - padLeft - padRight - midGap) / 2);
+    const pH = H - padTop - padBot;
+    const xMin = 46.0, xMax = 104.0;
+
+    const mapX = (px0, lvl) => px0 + ((lvl - xMin) / (xMax - xMin)) * pW;
+    const mapY = (d) => padTop + ((yMax - d) / (yMax - yMin)) * pH;
+
+    const yTicks = [];
+    const yStep = (yMax - yMin) > 28 ? 5 : 4;
+    for (let yv = Math.ceil(yMin / yStep) * yStep; yv <= yMax + 1e-6; yv += yStep) {
+      yTicks.push(yv);
+    }
+    if (!yTicks.some(v => Math.abs(v) < 1e-6) && 0 >= yMin && 0 <= yMax) {
+      yTicks.push(0);
+      yTicks.sort((a, b) => a - b);
+    }
+
+    const xTicks = [50, 60, 70, 80, 90, 100];
+    const parts = [
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block; background:#ffffff; border:1px solid #e2e8f0; border-radius:8px;">`
+    ];
+
+    CENTER_FREQS_HZ.forEach((fc, pIdx) => {
+      const px0 = padLeft + pIdx * (pW + midGap);
+      const fcRows = valid.filter(r => r.centerHz === fc);
+      const maxPass = fcRows.reduce((m, r) => Math.max(m, r.blockPass || 1), 1);
+
+      /* Panel frame & shaded component-listening region (<= compFlagDb) */
+      parts.push(`<rect x="${px0}" y="${padTop}" width="${pW}" height="${pH}" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>`);
+      if (compFlagDb > yMin) {
+        const yCompTop = mapY(Math.min(compFlagDb, yMax));
+        const hComp = Math.max(0, (padTop + pH) - yCompTop);
+        parts.push(`<rect x="${px0}" y="${yCompTop.toFixed(1)}" width="${pW}" height="${hComp.toFixed(1)}" fill="#fee2e2" opacity="0.55"/>`);
+        if (compFlagDb <= yMax) {
+          parts.push(`<line x1="${px0}" y1="${yCompTop.toFixed(1)}" x2="${px0 + pW}" y2="${yCompTop.toFixed(1)}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4,3"/>`);
+        }
+      }
+
+      /* Gridlines & ticks */
+      for (const yt of yTicks) {
+        const yy = mapY(yt);
+        const isZero = Math.abs(yt) < 1e-6;
+        parts.push(`<line x1="${px0}" y1="${yy.toFixed(1)}" x2="${px0 + pW}" y2="${yy.toFixed(1)}" stroke="${isZero ? "#64748b" : "#e2e8f0"}" stroke-width="${isZero ? "1.3" : "0.8"}" ${isZero ? 'stroke-dasharray="5,3"' : ""}/>`);
+        if (pIdx === 0) {
+          const lbl = yt > 0 ? `+${yt}` : `${yt}`;
+          parts.push(`<text x="${(px0 - 6).toFixed(1)}" y="${(yy + 3.5).toFixed(1)}" text-anchor="end" font-family="system-ui,sans-serif" font-size="10.5" fill="#475569">${lbl}</text>`);
+        }
+      }
+      for (const xt of xTicks) {
+        const xx = mapX(px0, xt);
+        parts.push(`<line x1="${xx.toFixed(1)}" y1="${padTop}" x2="${xx.toFixed(1)}" y2="${padTop + pH}" stroke="#e2e8f0" stroke-width="0.7"/>`);
+        parts.push(`<text x="${xx.toFixed(1)}" y="${padTop + pH + 14}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10.5" fill="#475569">${xt}</text>`);
+      }
+
+      /* Panel title & axis labels */
+      const passNote = maxPass > 1 ? ` (Pass ${maxPass} solid)` : "";
+      parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="20" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#0f172a">${fc === 1000 ? "1 kHz" : "4 kHz"} Block${passNote}</text>`);
+      parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#334155">Fixed Level (dB SPL)</text>`);
+
+      /* Group series by (blockPass, role, bandwidthOct) */
+      const seriesDefs = [
+        { role: "forward", bw: 1.0, color: "#1d4ed8", dash: "" },
+        { role: "forward", bw: 0.25, color: "#0d9488", dash: "4,2" },
+        { role: "reverse", bw: 1.0, color: "#7c3aed", dash: "2,2" },
+        { role: "reverse", bw: 0.25, color: "#9333ea", dash: "2,2" },
+        { role: "null", bw: 0.0, color: "#64748b", dash: "3,3" }
+      ];
+
+      for (let pass = 1; pass <= maxPass; pass++) {
+        const isOldPass = pass < maxPass;
+        const opacity = isOldPass ? "0.35" : "1.0";
+        for (const sd of seriesDefs) {
+          const pts = fcRows
+            .filter(r => (r.blockPass || 1) === pass && r.role === sd.role && Math.abs((r.bandwidthOct || 0) - sd.bw) < 0.01)
+            .sort((a, b) => a.fixedLevelSpl - b.fixedLevelSpl);
+          if (pts.length === 0) continue;
+
+          if (pts.length >= 2) {
+            const dPath = pts
+              .map((p, idx) => `${idx === 0 ? "M" : "L"}${mapX(px0, p.fixedLevelSpl).toFixed(1)},${mapY(p.deltaDb).toFixed(1)}`)
+              .join(" ");
+            const dashAttr = isOldPass ? 'stroke-dasharray="2,3"' : (sd.dash ? `stroke-dasharray="${sd.dash}"` : "");
+            parts.push(`<path d="${dPath}" fill="none" stroke="${sd.color}" stroke-width="${isOldPass ? "1.3" : "2.0"}" opacity="${opacity}" ${dashAttr}/>`);
+          }
+
+          for (const p of pts) {
+            const cx = mapX(px0, p.fixedLevelSpl);
+            const cy = mapY(p.deltaDb);
+            const se = Number.isFinite(p.seDb) ? p.seDb : 0.0;
+            if (se > 0 && !isOldPass) {
+              const yLo = mapY(Math.max(yMin, p.deltaDb - se));
+              const yHi = mapY(Math.min(yMax, p.deltaDb + se));
+              parts.push(`<line x1="${cx.toFixed(1)}" y1="${yHi.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yLo.toFixed(1)}" stroke="${sd.color}" stroke-width="1.3" opacity="0.75"/>`);
+              parts.push(`<line x1="${(cx - 3).toFixed(1)}" y1="${yHi.toFixed(1)}" x2="${(cx + 3).toFixed(1)}" y2="${yHi.toFixed(1)}" stroke="${sd.color}" stroke-width="1.3" opacity="0.75"/>`);
+              parts.push(`<line x1="${(cx - 3).toFixed(1)}" y1="${yLo.toFixed(1)}" x2="${(cx + 3).toFixed(1)}" y2="${yLo.toFixed(1)}" stroke="${sd.color}" stroke-width="1.3" opacity="0.75"/>`);
+            }
+            const atCeil = Array.isArray(p.flags) && p.flags.includes("AT_CEILING");
+            parts.push(`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${atCeil ? "4.6" : "3.8"}" fill="${atCeil ? "#f59e0b" : sd.color}" stroke="#ffffff" stroke-width="1.1" opacity="${opacity}"/>`);
+          }
+        }
+      }
+
+      if (fcRows.length === 0) {
+        parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="${(padTop + pH / 2).toFixed(1)}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#94a3b8">No active matches</text>`);
+      }
+    });
+
+    /* Y-axis label + legend strip */
+    const yMid = padTop + pH / 2;
+    parts.push(`<text x="14" y="${yMid.toFixed(1)}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#334155" transform="rotate(-90 14 ${yMid.toFixed(1)})">Δ = Tone PSE − Complex (dB)</text>`);
+    parts.push(`<text x="${W - padRight}" y="14" text-anchor="end" font-family="system-ui,sans-serif" font-size="10" fill="#64748b">Blue: 1-oct • Teal: 1/4-oct • Amber dot: AT_CEILING • Red zone: ≤ ${compFlagDb.toFixed(1)} dB</text>`);
+    parts.push(`</svg>`);
+    return parts.join("");
   }
 
   /*
@@ -1652,7 +1963,7 @@
         refDbfsRms60: String(saved.appVersion || "") === "1.0.0" ? LEGACY_V1_REF_DBFS_60DB : DEFAULT_REF_DBFS_60DB,
         offsetsDb: { ...TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
       };
-    const fsInfo = computeFullScale1kSpl(normCal);
+    const fsInfo = computeFullScale1kSpl(normCal, null, saved.ear || null);
     return {
       ...saved,
       calibration: {
@@ -1689,9 +2000,15 @@
     clampRefDbfs60,
     resolveRefDbfs60,
     resolveRefDigitalRms60,
+    resolveCalForEar,
     computeFullScale1kSpl,
+    generateRandomSeed,
     normalizeCalibrationRecord,
     normalizeSessionRecord,
+    formatCalibrationJson,
+    parseImportedCalibrationJson,
+    parseQclsElcCsv,
+    renderResultsSvg,
     getComplexComponentFreqs,
     lookupCalOffsetDb,
     createRng,
