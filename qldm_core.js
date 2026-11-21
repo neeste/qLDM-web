@@ -12,7 +12,7 @@
 (function (global) {
   "use strict";
 
-  const APP_VERSION = "1.1.2";
+  const APP_VERSION = "1.2.0";
   const DEFAULT_FS = 48000;
 
   /*
@@ -270,19 +270,175 @@
   const SOUND_1OCT = Object.freeze({ kind: "complex", bwOct: 1.0, label: "5tc_1oct" });
   const SOUND_QOCT = Object.freeze({ kind: "complex", bwOct: 0.25, label: "5tc_0.25oct" });
 
-  const STANDARD_LEVELS_SPL = [50, 60, 70, 80, 90, 100];
+  /*
+   * Listener-specific top level T and relative level offsets (Adopted 2026-11-21,
+   * LOUDNESS_MATCHING_APP_SPEC.md Sections 3 & 6; LOUDNESS_MATCHING_APP_FOLLOWUP_3.md):
+   *   - Block ceiling = min(Max Output, listener "Too loud" at centerHz), or Max Output
+   *     when no "Too loud" rating is entered.
+   *   - Top complex level T = min(95, 5 * floor((block_ceiling - 5) / 5)) dB SPL.
+   *   - Standard / Extended offsets from T: [-35, -25, -15, -10, -5, 0] dB
+   *     (giving [60, 70, 80, 85, 90, 95] dB SPL when T = 95).
+   *   - Short 4-match anchor set offsets from T: [-35, -5] dB (giving [60, 90] at T = 95).
+   */
+  const MAX_TOP_LEVEL_T_SPL = 95.0;
+  const TOP_LEVEL_MARGIN_DB = 5.0;
+  const TOP_LEVEL_STEP_DB = 5.0;
+  const STANDARD_LEVEL_OFFSETS_DB = Object.freeze([-35, -25, -15, -10, -5, 0]);
+  const SHORT4_LEVEL_OFFSETS_DB = Object.freeze([-35, -5]);
   const CENTER_FREQS_HZ = [1000, 4000];
+
+  function isFiniteEntry(v) {
+    return v !== null && v !== undefined && String(v).trim() !== "" && Number.isFinite(Number(v));
+  }
+
+  function deriveBlockLevelPlan(opts = {}) {
+    const centerHz = Number(opts.centerHz || 1000);
+    const setMode = opts.matchSet || "standard";
+    const maxOutRaw = isFiniteEntry(opts.maxOutputSpl) ? Number(opts.maxOutputSpl) : 100.0;
+    const maxOut = Math.min(Math.max(35.0, maxOutRaw), EQUIPMENT_MAX_SPL);
+    const hasUcl = isFiniteEntry(opts.uclSpl);
+    const uclSpl = hasUcl ? Number(opts.uclSpl) : null;
+    const hasCu5 = isFiniteEntry(opts.cu5Spl);
+    const cu5Spl = hasCu5 ? Number(opts.cu5Spl) : null;
+
+    let ceilingSpl = hasUcl ? Math.min(maxOut, uclSpl) : maxOut;
+    let ceilingSource = hasUcl && uclSpl < maxOut - 1e-9
+      ? "listener_too_loud"
+      : (hasUcl && Math.abs(uclSpl - maxOut) <= 1e-9 ? "max_output_and_too_loud" : "max_output");
+
+    if (isFiniteEntry(opts.explicitCeilingSpl)) {
+      ceilingSpl = Math.min(Math.max(MIN_VARIED_SPL + 15.0, Number(opts.explicitCeilingSpl)), EQUIPMENT_MAX_SPL);
+      ceilingSource = "lowered_ceiling";
+    }
+
+    const rawBelowCeil = ceilingSpl - TOP_LEVEL_MARGIN_DB;
+    const steppedT = TOP_LEVEL_STEP_DB * Math.floor((rawBelowCeil + 1e-9) / TOP_LEVEL_STEP_DB);
+    const topLevelSpl = isFiniteEntry(opts.explicitTopLevelSpl)
+      ? Math.min(MAX_TOP_LEVEL_T_SPL, Number(opts.explicitTopLevelSpl))
+      : Math.max(MIN_VARIED_SPL, Math.min(MAX_TOP_LEVEL_T_SPL, steppedT));
+
+    const offsets = setMode === "short4" ? SHORT4_LEVEL_OFFSETS_DB : STANDARD_LEVEL_OFFSETS_DB;
+    const sixLevelsSpl = STANDARD_LEVEL_OFFSETS_DB.map(off => topLevelSpl + off);
+    const candidateLevelsSpl = offsets.map(off => topLevelSpl + off);
+
+    const evaluateLevelReason = (lvl) => {
+      if (cu5Spl !== null && lvl < cu5Spl + 10.0 - 1e-9) {
+        return `BELOW_CU5_PLUS_10DB (CU5=${cu5Spl.toFixed(1)})`;
+      }
+      if (lvl < MIN_VARIED_SPL - 1e-9) {
+        return `BELOW_MIN_SPL (${MIN_VARIED_SPL.toFixed(1)})`;
+      }
+      if (lvl > ceilingSpl + 1e-9) {
+        return `ABOVE_MAX_OUTPUT (${ceilingSpl.toFixed(1)})`;
+      }
+      return "";
+    };
+
+    const levelDetails = candidateLevelsSpl.map(lvl => ({
+      levelSpl: lvl,
+      excludedReason: evaluateLevelReason(lvl)
+    }));
+    const activeLevelsSpl = levelDetails.filter(d => !d.excludedReason).map(d => d.levelSpl);
+    const excludedLevels = levelDetails.filter(d => Boolean(d.excludedReason));
+
+    const lowestComplexSpl = activeLevelsSpl.length > 0
+      ? Math.min(...activeLevelsSpl)
+      : Math.min(...candidateLevelsSpl);
+    const highestComplexSpl = activeLevelsSpl.length > 0
+      ? Math.max(...activeLevelsSpl)
+      : topLevelSpl;
+    const lowestToneSpl = Math.max(MIN_VARIED_SPL, lowestComplexSpl - VARIED_OFFSET_LIM_DB);
+
+    return {
+      centerHz,
+      matchSet: setMode,
+      maxOutputSpl: maxOut,
+      uclSpl,
+      cu5Spl,
+      ceilingSpl,
+      ceilingSource,
+      topLevelSpl,
+      offsetsDb: Array.from(offsets),
+      sixLevelsSpl,
+      candidateLevelsSpl,
+      levelDetails,
+      activeLevelsSpl,
+      excludedLevels,
+      lowestComplexSpl,
+      highestComplexSpl,
+      lowestToneSpl,
+      highestToneSpl: ceilingSpl,
+      evaluateLevelReason
+    };
+  }
+
+  function deriveSessionLevelPlans(settings = {}) {
+    const maxOutputSpl = settings.initialMaxOutputSpl ?? settings.maxOutputSpl ?? 100.0;
+    const matchSet = settings.matchSet || "standard";
+    const lim = settings.limits || {};
+    const plansByHz = {};
+    for (const fc of CENTER_FREQS_HZ) {
+      plansByHz[fc] = deriveBlockLevelPlan({
+        centerHz: fc,
+        maxOutputSpl,
+        uclSpl: fc === 1000 ? lim.ucl_1k : lim.ucl_4k,
+        cu5Spl: fc === 1000 ? lim.cu5_1k : lim.cu5_4k,
+        matchSet
+      });
+    }
+    const allLowestTones = CENTER_FREQS_HZ.map(fc => plansByHz[fc].lowestToneSpl);
+    const allHighestComplexes = CENTER_FREQS_HZ.map(fc => plansByHz[fc].highestComplexSpl);
+    const allCeilings = CENTER_FREQS_HZ.map(fc => plansByHz[fc].ceilingSpl);
+    return {
+      plansByHz,
+      sessionLowestToneSpl: Math.min(...allLowestTones),
+      sessionHighestComplexSpl: Math.max(...allHighestComplexes),
+      sessionMaxCeilingSpl: Math.max(...allCeilings),
+      sessionMinCeilingSpl: Math.min(...allCeilings)
+    };
+  }
 
   function buildMatchTable(options = {}) {
     const setMode = options.matchSet || "standard"; // "standard" (12) | "extended" (24) | "short4" (4)
     const includeNull = Boolean(options.includeNullMatches);
     const includeReverse = Boolean(options.includeReverseMatches);
-    const levels = options.levelsSpl || (setMode === "short4" ? [60, 90] : STANDARD_LEVELS_SPL);
     const bws = setMode === "extended" ? [1.0, 0.25] : [1.0];
+    const freqs = Array.isArray(options.centerFreqsHz) && options.centerFreqsHz.length > 0
+      ? options.centerFreqsHz
+      : CENTER_FREQS_HZ;
+    const maxOutputSpl = options.maxOutputSpl ?? options.initialMaxOutputSpl ?? 100.0;
+    const lim = options.limits || {};
 
     const table = [];
     let idx = 1;
-    for (const fc of CENTER_FREQS_HZ) {
+    for (const fc of freqs) {
+      const fcUcl = options.uclByHz && fc in options.uclByHz
+        ? options.uclByHz[fc]
+        : (fc === 1000 ? lim.ucl_1k : lim.ucl_4k);
+      const fcCu5 = options.cu5ByHz && fc in options.cu5ByHz
+        ? options.cu5ByHz[fc]
+        : (fc === 1000 ? lim.cu5_1k : lim.cu5_4k);
+      const fcExplicitCeil = options.ceilingByHz && fc in options.ceilingByHz
+        ? options.ceilingByHz[fc]
+        : (options.explicitCeilingSpl ?? null);
+      const fcExplicitTop = options.topLevelsByHz && fc in options.topLevelsByHz
+        ? options.topLevelsByHz[fc]
+        : (options.topLevelSpl ?? null);
+
+      const plan = deriveBlockLevelPlan({
+        centerHz: fc,
+        maxOutputSpl,
+        uclSpl: fcUcl,
+        cu5Spl: fcCu5,
+        explicitCeilingSpl: fcExplicitCeil,
+        explicitTopLevelSpl: fcExplicitTop,
+        matchSet: setMode
+      });
+
+      const levels = (options.levelsSplByHz && Array.isArray(options.levelsSplByHz[fc]))
+        ? options.levelsSplByHz[fc]
+        : (Array.isArray(options.levelsSpl) ? options.levelsSpl : plan.candidateLevelsSpl);
+
       for (const bw of bws) {
         const compSound = bw === 0.25 ? { ...SOUND_QOCT } : { ...SOUND_1OCT };
         for (const lvl of levels) {
@@ -290,9 +446,12 @@
             matchIndex: idx++,
             id: `M${String(table.length + 1).padStart(2, "0")}_F_${fc}Hz_${bw}oct_${lvl}dB`,
             centerHz: fc,
+            topLevelSpl: plan.topLevelSpl,
+            blockCeilingSpl: plan.ceilingSpl,
             fixedSound: compSound,
             variedSound: { ...SOUND_TONE },
             fixedLevelSpl: lvl,
+            excludedReason: plan.evaluateLevelReason(lvl),
             role: "forward"
           });
           if (includeReverse) {
@@ -300,30 +459,115 @@
               matchIndex: idx++,
               id: `M${String(table.length + 1).padStart(2, "0")}_R_${fc}Hz_${bw}oct_${lvl}dB`,
               centerHz: fc,
+              topLevelSpl: plan.topLevelSpl,
+              blockCeilingSpl: plan.ceilingSpl,
               fixedSound: { ...SOUND_TONE },
               variedSound: compSound,
               fixedLevelSpl: lvl,
+              excludedReason: plan.evaluateLevelReason(lvl),
               role: "reverse"
             });
           }
         }
       }
       if (includeNull) {
-        const nullLevels = options.nullLevelsSpl || [60, 90];
+        const nullLevels = Array.isArray(options.nullLevelsSpl)
+          ? options.nullLevelsSpl
+          : SHORT4_LEVEL_OFFSETS_DB.map(off => plan.topLevelSpl + off);
         for (const nl of nullLevels) {
           table.push({
             matchIndex: idx++,
             id: `M${String(table.length + 1).padStart(2, "0")}_N_${fc}Hz_tone_${nl}dB`,
             centerHz: fc,
+            topLevelSpl: plan.topLevelSpl,
+            blockCeilingSpl: plan.ceilingSpl,
             fixedSound: { ...SOUND_TONE },
             variedSound: { ...SOUND_TONE },
             fixedLevelSpl: nl,
+            excludedReason: plan.evaluateLevelReason(nl),
             role: "null"
           });
         }
       }
     }
     return table;
+  }
+
+  function createSessionBlockState(centerHz, blockPass, settings = {}, explicitCeilingSpl = null) {
+    const maxOutputSpl = settings.initialMaxOutputSpl ?? settings.maxOutputSpl ?? 100.0;
+    const matchSet = settings.matchSet || "standard";
+    const trialsPerTrack = Number(settings.trialsPerTrack ?? 8);
+    const lim = settings.limits || {};
+    const uclSpl = centerHz === 1000 ? lim.ucl_1k : lim.ucl_4k;
+    const cu5Spl = centerHz === 1000 ? lim.cu5_1k : lim.cu5_4k;
+
+    const plan = deriveBlockLevelPlan({
+      centerHz,
+      maxOutputSpl,
+      uclSpl,
+      cu5Spl,
+      explicitCeilingSpl,
+      matchSet
+    });
+
+    const rawMatches = buildMatchTable({
+      centerFreqsHz: [centerHz],
+      matchSet,
+      includeNullMatches: Boolean(settings.includeNullMatches),
+      includeReverseMatches: Boolean(settings.includeReverseMatches),
+      maxOutputSpl,
+      limits: lim,
+      explicitCeilingSpl: plan.ceilingSpl
+    });
+
+    const matches = rawMatches.map((m, idx) => ({
+      ...m,
+      matchIndex: idx + 1,
+      blockPass,
+      excludedReason: m.excludedReason || plan.evaluateLevelReason(m.fixedLevelSpl)
+    }));
+
+    const pairs = matches.map((m) => {
+      if (m.excludedReason) {
+        return { upper: null, lower: null };
+      }
+      return {
+        upper: createTrackState(m, "upper", {
+          startOffsetDb: 10.0,
+          trialsPerTrack,
+          ceilingSpl: plan.ceilingSpl
+        }),
+        lower: createTrackState(m, "lower", {
+          startOffsetDb: 10.0,
+          trialsPerTrack,
+          ceilingSpl: plan.ceilingSpl
+        })
+      };
+    });
+
+    return {
+      blockPass,
+      centerHz,
+      started: false,
+      completed: false,
+      recomputedBeforeStartCount: 0,
+      uclSpl: plan.uclSpl,
+      cu5Spl: plan.cu5Spl,
+      ceilingSource: plan.ceilingSource,
+      initialCeilingSpl: plan.ceilingSpl,
+      ceilingSpl: plan.ceilingSpl,
+      initialTopLevelSpl: plan.topLevelSpl,
+      topLevelSpl: plan.topLevelSpl,
+      sixLevelsSpl: plan.sixLevelsSpl.slice(),
+      candidateLevelsSpl: plan.candidateLevelsSpl.slice(),
+      activeLevelsSpl: plan.activeLevelsSpl.slice(),
+      excludedLevels: plan.excludedLevels.map(e => ({ ...e })),
+      lowestToneSpl: plan.lowestToneSpl,
+      matches,
+      pairs,
+      trialsInBlockCompleted: 0,
+      evalSummary: null
+    };
   }
 
   /* -------------------------------------------------------------------------
@@ -1264,16 +1508,25 @@
     const startDb = Number(params.startOffsetDb ?? 10.0);
     const trueLapse = Number(params.lapse ?? 0.02);
     const ceilingSpl = Number(params.ceilingSpl ?? 130);
+    const topLevelSpl = Number(params.topLevelSpl ?? MAX_TOP_LEVEL_T_SPL);
     const sTrue = trueSigma / LOGISTIC_K;
 
     const trueDeltas = params.trueDeltas || Array.from({ length: M }, () => -8.0 + 10.0 * rng.next());
+    const fixedLevels = Array.isArray(params.fixedLevelsSpl) && params.fixedLevelsSpl.length === M
+      ? params.fixedLevelsSpl
+      : Array.from({ length: M }, (_, idx) =>
+          M === STANDARD_LEVEL_OFFSETS_DB.length
+            ? topLevelSpl + STANDARD_LEVEL_OFFSETS_DB[idx]
+            : 50 + idx * 10
+        );
+
     const matches = trueDeltas.map((_, idx) => ({
       matchIndex: idx + 1,
       id: `SIM_M${idx + 1}`,
       centerHz: 1000,
       fixedSound: SOUND_1OCT,
       variedSound: SOUND_TONE,
-      fixedLevelSpl: 50 + idx * 10,
+      fixedLevelSpl: fixedLevels[idx],
       role: "forward"
     }));
 
@@ -1298,7 +1551,95 @@
     }
 
     const evalRes = evaluateBlockMatches(matches, pairs, { componentFlagThresholdDb: -999 });
-    return { trueDeltas, evalRes };
+    return { trueDeltas, matches, pairs, evalRes };
+  }
+
+  /*
+   * Top-level ceiling simulation (Follow-up 3, Request 6):
+   * Evaluates bias, SD, AT_CEILING rate, and ceiling bound counts when the complex
+   * is at T and the block ceiling is T + 5 dB (psychometric SD = 4 dB, 16 trials/match).
+   */
+  function runTopLevelCeilingSimulation(params = {}) {
+    const topLevelSpl = Number(params.topLevelSpl ?? MAX_TOP_LEVEL_T_SPL);
+    const ceilingSpl = Number(params.ceilingSpl ?? (topLevelSpl + TOP_LEVEL_MARGIN_DB));
+    const sigma = Number(params.sigma ?? 4.0);
+    const trialsPerTrack = Number(params.trialsPerTrack ?? 8);
+    const nBlocks = Number(params.nBlocks ?? 1500);
+    const testDeltas = params.testDeltas || [-4, -2, 0, 2, 4, 6];
+    const seedBase = Number(params.seed ?? 20261121);
+    const fixedLevelsSpl = STANDARD_LEVEL_OFFSETS_DB.map(off => topLevelSpl + off);
+
+    return testDeltas.map((trueTopDelta, dIdx) => {
+      const rng = createRng(seedBase + dIdx * 1009);
+      const allErrs = [];
+      const unflaggedErrs = [];
+      let nFlagged = 0;
+      let sumAtCeilAll = 0;
+      let sumFixedLouderAll = 0;
+      let sumAtCeilFlagged = 0;
+      let sumFixedLouderFlagged = 0;
+
+      for (let b = 0; b < nBlocks; b++) {
+        /* Lower 5 levels vary across [-4..+4] dB while top level T has exact trueTopDelta */
+        const trueDeltas = [
+          -4.0 + 8.0 * rng.next(),
+          -4.0 + 8.0 * rng.next(),
+          -4.0 + 8.0 * rng.next(),
+          -4.0 + 8.0 * rng.next(),
+          -4.0 + 8.0 * rng.next(),
+          trueTopDelta
+        ];
+        const { evalRes } = runSimulatedBlock(rng, {
+          matchesPerBlock: 6,
+          trialsPerTrack,
+          sigma,
+          lapse: 0.02,
+          topLevelSpl,
+          ceilingSpl,
+          fixedLevelsSpl,
+          trueDeltas
+        });
+        const topRow = evalRes.rows[5];
+        const err = topRow.deltaDb - trueTopDelta;
+        allErrs.push(err);
+        sumAtCeilAll += topRow.nAtCeiling;
+        sumFixedLouderAll += topRow.nAtCeilingFixedLouder;
+
+        if (topRow.flags.includes("AT_CEILING")) {
+          nFlagged += 1;
+          sumAtCeilFlagged += topRow.nAtCeiling;
+          sumFixedLouderFlagged += topRow.nAtCeilingFixedLouder;
+        } else {
+          unflaggedErrs.push(err);
+        }
+      }
+
+      const meanAndSd = (arr) => {
+        if (arr.length === 0) return { mean: NaN, sd: NaN };
+        const m = arr.reduce((a, v) => a + v, 0.0) / arr.length;
+        const v = arr.reduce((a, x) => a + (x - m) * (x - m), 0.0) / arr.length;
+        return { mean: m, sd: Math.sqrt(v) };
+      };
+
+      const stAll = meanAndSd(allErrs);
+      const stUnf = meanAndSd(unflaggedErrs);
+
+      return {
+        topLevelSpl,
+        ceilingSpl,
+        trueDeltaDb: trueTopDelta,
+        nBlocks,
+        biasAllDb: stAll.mean,
+        sdAllDb: stAll.sd,
+        biasUnflaggedDb: stUnf.mean,
+        sdUnflaggedDb: stUnf.sd,
+        atCeilingRatePct: (100.0 * nFlagged) / nBlocks,
+        meanNAtCeilingAll: sumAtCeilAll / nBlocks,
+        meanNFixedLouderAll: sumFixedLouderAll / nBlocks,
+        meanNAtCeilingWhenFlagged: nFlagged > 0 ? sumAtCeilFlagged / nFlagged : 0.0,
+        meanNFixedLouderWhenFlagged: nFlagged > 0 ? sumFixedLouderFlagged / nFlagged : 0.0
+      };
+    });
   }
 
   /* -------------------------------------------------------------------------
@@ -1314,30 +1655,101 @@
   }
 
   /*
-   * Apply a "Too loud" event to a session object (Spec Section 6):
-   * Lowers ceilingSpl by 5 dB for the rest of the session, ends every track whose
-   * fixed level exceeds the new ceiling, clamps active tracks, and logs the event.
+   * Apply a "Too loud" event to a session object (Spec Section 6 & Follow-up 3):
+   *   - Lowers the ceiling of EVERY block by 5 dB for the rest of the session.
+   *   - For a block that has NOT started yet, recomputes its top level T and
+   *     match set from the lowered block ceiling so it still gets six levels.
+   *   - For a block that HAS started, ends every track whose fixed level exceeds
+   *     the new ceiling and clamps active tracks to the new ceiling.
    */
-  function applyTooLoudToSession(sess, presentation = null, timestampIso = null) {
-    const oldCeiling = Number(sess.ceilingSpl ?? 100.0);
-    const newCeiling = Math.max(MIN_VARIED_SPL + 15.0, oldCeiling - 5.0);
-    sess.ceilingSpl = newCeiling;
-
-    if (Array.isArray(sess.blocks)) {
-      for (const blk of sess.blocks) {
-        blk.matches.forEach((m, idx) => {
-          const pair = blk.pairs[idx];
-          if (!pair || (!pair.upper && !pair.lower)) return;
-          const hadTrials =
-            (pair.upper ? pair.upper.trialsCompleted : 0) +
-            (pair.lower ? pair.lower.trialsCompleted : 0);
-          if (m.fixedLevelSpl > newCeiling + 1e-9 && hadTrials === 0 && !m.excludedReason) {
-            m.excludedReason = `TOO_LOUD_CEILING (${newCeiling.toFixed(1)})`;
-          }
-          if (pair.upper) applyCeilingChangeToTrack(pair.upper, newCeiling);
-          if (pair.lower) applyCeilingChangeToTrack(pair.lower, newCeiling);
-        });
+  function hasBlockStarted(blk, sess, presentation) {
+    if (!blk) return false;
+    if (blk.started || blk.completed || (blk.trialsInBlockCompleted || 0) > 0) return true;
+    if (presentation && !presentation.isPractice && Array.isArray(sess?.blocks)) {
+      if (sess.blocks[sess.activeBlockArrayIndex] === blk) return true;
+    }
+    if (Array.isArray(blk.pairs)) {
+      for (const p of blk.pairs) {
+        const done = (p?.upper ? p.upper.trialsCompleted : 0) + (p?.lower ? p.lower.trialsCompleted : 0);
+        if (done > 0) return true;
       }
+    }
+    return false;
+  }
+
+  function applyTooLoudToSession(sess, presentation = null, timestampIso = null) {
+    const activeBlk = Array.isArray(sess.blocks)
+      ? (sess.blocks[sess.activeBlockArrayIndex] || sess.blocks[0] || null)
+      : null;
+    const oldActiveCeiling = Number(activeBlk?.ceilingSpl ?? sess.ceilingSpl ?? 100.0);
+    let newActiveCeiling = Math.max(MIN_VARIED_SPL + 15.0, oldActiveCeiling - 5.0);
+
+    const blockCeilingChanges = [];
+    if (Array.isArray(sess.blocks) && sess.blocks.length > 0) {
+      for (let bIdx = 0; bIdx < sess.blocks.length; bIdx++) {
+        const blk = sess.blocks[bIdx];
+        const started = hasBlockStarted(blk, sess, presentation);
+        const oldBlkCeil = Number(blk.ceilingSpl ?? sess.ceilingSpl ?? 100.0);
+        const newBlkCeil = Math.max(MIN_VARIED_SPL + 15.0, oldBlkCeil - 5.0);
+        blk.ceilingSpl = newBlkCeil;
+        if (blk === activeBlk) {
+          newActiveCeiling = newBlkCeil;
+        }
+
+        if (!started) {
+          /* Block has not started yet -> recompute T and full 6-level match table below newBlkCeil */
+          const rebuilt = createSessionBlockState(
+            blk.centerHz,
+            blk.blockPass || 1,
+            sess.settings || {},
+            newBlkCeil
+          );
+          const prevInitCeil = blk.initialCeilingSpl ?? oldBlkCeil;
+          const prevInitTop = blk.initialTopLevelSpl ?? blk.topLevelSpl ?? rebuilt.topLevelSpl;
+          const prevRecompCount = (blk.recomputedBeforeStartCount || 0) + 1;
+
+          Object.assign(blk, rebuilt, {
+            initialCeilingSpl: prevInitCeil,
+            ceilingSpl: newBlkCeil,
+            initialTopLevelSpl: prevInitTop,
+            recomputedBeforeStartCount: prevRecompCount,
+            started: false
+          });
+          blockCeilingChanges.push({
+            centerHz: blk.centerHz,
+            blockPass: blk.blockPass,
+            started: false,
+            recomputedTopLevelSpl: blk.topLevelSpl,
+            oldCeilingSpl: oldBlkCeil,
+            newCeilingSpl: newBlkCeil
+          });
+        } else {
+          blk.started = true;
+          blk.matches.forEach((m, idx) => {
+            const pair = blk.pairs[idx];
+            if (!pair || (!pair.upper && !pair.lower)) return;
+            const hadTrials =
+              (pair.upper ? pair.upper.trialsCompleted : 0) +
+              (pair.lower ? pair.lower.trialsCompleted : 0);
+            if (m.fixedLevelSpl > newBlkCeil + 1e-9 && hadTrials === 0 && !m.excludedReason) {
+              m.excludedReason = `TOO_LOUD_CEILING (${newBlkCeil.toFixed(1)})`;
+            }
+            if (pair.upper) applyCeilingChangeToTrack(pair.upper, newBlkCeil);
+            if (pair.lower) applyCeilingChangeToTrack(pair.lower, newBlkCeil);
+          });
+          blockCeilingChanges.push({
+            centerHz: blk.centerHz,
+            blockPass: blk.blockPass,
+            started: true,
+            recomputedTopLevelSpl: null,
+            oldCeilingSpl: oldBlkCeil,
+            newCeilingSpl: newBlkCeil
+          });
+        }
+      }
+      sess.ceilingSpl = newActiveCeiling;
+    } else {
+      sess.ceilingSpl = newActiveCeiling;
     }
 
     if (!Array.isArray(sess.tooLoudEvents)) sess.tooLoudEvents = [];
@@ -1345,13 +1757,14 @@
       timestampIso: timestampIso || new Date().toISOString(),
       phase: sess.phase || "block",
       blockPass: presentation ? presentation.blockPass : null,
-      blockHz: presentation ? presentation.blockHz : null,
+      blockHz: presentation ? presentation.blockHz : (activeBlk ? activeBlk.centerHz : null),
       matchId: presentation ? presentation.matchId : null,
       trackId: presentation ? presentation.trackId : null,
       fixedLevelSpl: presentation ? presentation.fixedLevelSpl : null,
       variedLevelSpl: presentation ? presentation.variedLevelSpl : null,
-      oldCeilingSpl: oldCeiling,
-      newCeilingSpl: newCeiling
+      oldCeilingSpl: oldActiveCeiling,
+      newCeilingSpl: newActiveCeiling,
+      blockChanges: blockCeilingChanges
     });
 
     if (presentation) {
@@ -1386,15 +1799,15 @@
         variedJudgedLouder: "",
         tooLoud: 1,
         rtMs: "",
-        ceilingSpl: newCeiling,
+        ceilingSpl: newActiveCeiling,
         guardStatus: "TOO_LOUD_PRESSED"
       });
       if (!presentation.isPractice && presentation.trackRef && !presentation.trackRef.finished) {
-        applyCeilingChangeToTrack(presentation.trackRef, newCeiling);
+        applyCeilingChangeToTrack(presentation.trackRef, newActiveCeiling);
       }
     }
 
-    return { oldCeiling, newCeiling };
+    return { oldCeiling: oldActiveCeiling, newCeiling: newActiveCeiling, blockChanges: blockCeilingChanges };
   }
 
   function collectSessionPseRows(sess) {
@@ -1646,6 +2059,35 @@
         equipment_max_spl: EQUIPMENT_MAX_SPL,
         listener_limits: sess.settings?.limits || {},
         qcls_contour_file: sess.settings?.qclsSourceFile || null,
+        level_scheme: {
+          rule: "Block ceiling = min(Max Output, listener Too Loud at centerHz) or Max Output when empty; top level T = min(95, 5 * floor((block_ceiling - 5) / 5)) dB SPL.",
+          standard_offsets_from_t_db: Array.from(STANDARD_LEVEL_OFFSETS_DB),
+          short4_offsets_from_t_db: Array.from(SHORT4_LEVEL_OFFSETS_DB),
+          unstarted_block_on_too_loud: "Pressing Too Loud lowers every block ceiling by 5 dB and recomputes T and candidate levels for any block not yet started."
+        },
+        blocks_by_frequency: (sess.blocks || []).map((blk) => {
+          const allMatchLvls = Array.from(new Set((blk.matches || []).map(m => m.fixedLevelSpl))).sort((a, b) => a - b);
+          const activeLvls = Array.from(new Set((blk.matches || []).filter(m => !m.excludedReason).map(m => m.fixedLevelSpl))).sort((a, b) => a - b);
+          const exclLvls = (blk.matches || [])
+            .filter(m => Boolean(m.excludedReason))
+            .map(m => ({ level_spl: m.fixedLevelSpl, role: m.role, bandwidth_oct: m.fixedSound?.bwOct ?? 0, reason: m.excludedReason }));
+          return {
+            block_pass: blk.blockPass || 1,
+            center_hz: blk.centerHz,
+            listener_cu5_spl: blk.cu5Spl ?? null,
+            listener_too_loud_spl: blk.uclSpl ?? null,
+            initial_ceiling_spl: blk.initialCeilingSpl ?? blk.ceilingSpl ?? sess.ceilingSpl,
+            final_ceiling_spl: blk.ceilingSpl ?? sess.ceilingSpl,
+            initial_top_level_t_spl: blk.initialTopLevelSpl ?? blk.topLevelSpl ?? (allMatchLvls.length ? Math.max(...allMatchLvls) : MAX_TOP_LEVEL_T_SPL),
+            final_top_level_t_spl: blk.topLevelSpl ?? (allMatchLvls.length ? Math.max(...allMatchLvls) : MAX_TOP_LEVEL_T_SPL),
+            six_levels_from_t_spl: blk.sixLevelsSpl || STANDARD_LEVEL_OFFSETS_DB.map(off => (blk.topLevelSpl ?? MAX_TOP_LEVEL_T_SPL) + off),
+            candidate_levels_spl: blk.candidateLevelsSpl || allMatchLvls,
+            active_levels_spl: activeLvls,
+            excluded_levels: exclLvls,
+            lowest_tone_spl: blk.lowestToneSpl ?? (activeLvls.length ? Math.max(MIN_VARIED_SPL, Math.min(...activeLvls) - VARIED_OFFSET_LIM_DB) : 40),
+            recomputed_before_start_count: blk.recomputedBeforeStartCount || 0
+          };
+        }),
         too_loud_events: sess.tooLoudEvents || []
       },
       practice_summary: sess.practice || null,
@@ -1837,9 +2279,6 @@
     const padTop = 32, padBot = 40, padLeft = 48, padRight = 18, midGap = 46;
     const pW = Math.floor((W - padLeft - padRight - midGap) / 2);
     const pH = H - padTop - padBot;
-    const xMin = 46.0, xMax = 104.0;
-
-    const mapX = (px0, lvl) => px0 + ((lvl - xMin) / (xMax - xMin)) * pW;
     const mapY = (d) => padTop + ((yMax - d) / (yMax - yMin)) * pH;
 
     const yTicks = [];
@@ -1852,7 +2291,6 @@
       yTicks.sort((a, b) => a - b);
     }
 
-    const xTicks = [50, 60, 70, 80, 90, 100];
     const parts = [
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" style="width:100%; max-width:${W}px; height:auto; display:block; background:#ffffff; border:1px solid #e2e8f0; border-radius:8px;">`
     ];
@@ -1860,6 +2298,30 @@
     CENTER_FREQS_HZ.forEach((fc, pIdx) => {
       const px0 = padLeft + pIdx * (pW + midGap);
       const fcRows = valid.filter(r => r.centerHz === fc);
+      const fcAllRows = rows.filter(r => r.centerHz === fc);
+      const fcBlocks = (sess.blocks || []).filter(b => b.centerHz === fc);
+      const latestBlk = fcBlocks.length > 0 ? fcBlocks[fcBlocks.length - 1] : null;
+
+      /* Derive x-axis ticks directly from the levels in use for this center frequency */
+      const rawTickSet = new Set();
+      if (latestBlk && Array.isArray(latestBlk.sixLevelsSpl) && latestBlk.sixLevelsSpl.length > 0 && sess.settings?.matchSet !== "short4") {
+        latestBlk.sixLevelsSpl.forEach(v => rawTickSet.add(Number(v)));
+      } else if (latestBlk && Array.isArray(latestBlk.candidateLevelsSpl) && latestBlk.candidateLevelsSpl.length > 0) {
+        latestBlk.candidateLevelsSpl.forEach(v => rawTickSet.add(Number(v)));
+      }
+      fcAllRows.forEach(r => {
+        if (Number.isFinite(r.fixedLevelSpl)) rawTickSet.add(Number(r.fixedLevelSpl));
+      });
+      if (rawTickSet.size === 0) {
+        STANDARD_LEVEL_OFFSETS_DB.forEach(off => rawTickSet.add(MAX_TOP_LEVEL_T_SPL + off));
+      }
+      const xTicks = Array.from(rawTickSet).sort((a, b) => a - b);
+      const minTick = Math.min(...xTicks);
+      const maxTick = Math.max(...xTicks);
+      const xMin = minTick - 4.0;
+      const xMax = Math.max(minTick + 10.0, maxTick + 4.0);
+      const mapX = (pxBase, lvl) => pxBase + ((lvl - xMin) / (xMax - xMin)) * pW;
+
       const maxPass = fcRows.reduce((m, r) => Math.max(m, r.blockPass || 1), 1);
 
       /* Panel frame & shaded component-listening region (<= compFlagDb) */
@@ -1886,12 +2348,15 @@
       for (const xt of xTicks) {
         const xx = mapX(px0, xt);
         parts.push(`<line x1="${xx.toFixed(1)}" y1="${padTop}" x2="${xx.toFixed(1)}" y2="${padTop + pH}" stroke="#e2e8f0" stroke-width="0.7"/>`);
-        parts.push(`<text x="${xx.toFixed(1)}" y="${padTop + pH + 14}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10.5" fill="#475569">${xt}</text>`);
+        parts.push(`<text x="${xx.toFixed(1)}" y="${padTop + pH + 14}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#475569">${xt}</text>`);
       }
 
       /* Panel title & axis labels */
-      const passNote = maxPass > 1 ? ` (Pass ${maxPass} solid)` : "";
-      parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="20" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" fill="#0f172a">${fc === 1000 ? "1 kHz" : "4 kHz"} Block${passNote}</text>`);
+      const tTag = latestBlk && Number.isFinite(latestBlk.topLevelSpl)
+        ? ` (T=${latestBlk.topLevelSpl.toFixed(0)}, Ceil=${(latestBlk.ceilingSpl ?? sess.ceilingSpl ?? 100).toFixed(0)} dB)`
+        : "";
+      const passNote = maxPass > 1 ? ` • P${maxPass}` : "";
+      parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="20" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#0f172a">${fc === 1000 ? "1 kHz" : "4 kHz"} Block${tTag}${passNote}</text>`);
       parts.push(`<text x="${(px0 + pW / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#334155">Fixed Level (dB SPL)</text>`);
 
       /* Group series by (blockPass, role, bandwidthOct) */
@@ -1964,8 +2429,20 @@
         offsetsDb: { ...TRANSDUCER_PRESETS.er3a_nominal.offsetsDb }
       };
     const fsInfo = computeFullScale1kSpl(normCal, null, saved.ear || null);
+    const normBlocks = Array.isArray(saved.blocks)
+      ? saved.blocks.map((b) => {
+          const fallbackCeil = Number(b.ceilingSpl ?? saved.ceilingSpl ?? 100.0);
+          return {
+            ...b,
+            ceilingSpl: fallbackCeil,
+            initialCeilingSpl: Number(b.initialCeilingSpl ?? fallbackCeil),
+            started: Boolean(b.started || b.completed || (b.trialsInBlockCompleted || 0) > 0)
+          };
+        })
+      : [];
     return {
       ...saved,
+      blocks: normBlocks,
       calibration: {
         ...normCal,
         refDbfsRms60: fsInfo.refDbfsRms60,
@@ -1990,10 +2467,14 @@
     VARIED_OFFSET_LIM_DB,
     EQUIPMENT_MAX_SPL,
     MIN_VARIED_SPL,
+    MAX_TOP_LEVEL_T_SPL,
+    TOP_LEVEL_MARGIN_DB,
+    TOP_LEVEL_STEP_DB,
+    STANDARD_LEVEL_OFFSETS_DB,
+    SHORT4_LEVEL_OFFSETS_DB,
     SOUND_TONE,
     SOUND_1OCT,
     SOUND_QOCT,
-    STANDARD_LEVELS_SPL,
     CENTER_FREQS_HZ,
     CALIBRATION_FREQS,
     TRANSDUCER_PRESETS,
@@ -2003,6 +2484,9 @@
     resolveCalForEar,
     computeFullScale1kSpl,
     generateRandomSeed,
+    deriveBlockLevelPlan,
+    deriveSessionLevelPlans,
+    createSessionBlockState,
     normalizeCalibrationRecord,
     normalizeSessionRecord,
     formatCalibrationJson,
@@ -2023,6 +2507,7 @@
     fitBlockML,
     evaluateBlockMatches,
     runSimulatedBlock,
+    runTopLevelCeilingSimulation,
     applyTooLoudToSession,
     collectSessionPseRows,
     formatPseCsv,

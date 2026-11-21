@@ -280,15 +280,27 @@ assert.equal(missingCalRes.reason, "MISSING_CALIBRATION_ENTRY");
 console.log(`[PASS Safety Guard] Verified refusal of DIGITAL_CLIP_PREVENTED, CEILING_EXCEEDED_BY_BUFFER, NAN_OR_INFINITE_SAMPLE, and MISSING_CALIBRATION_ENTRY.`);
 
 /* -------------------------------------------------------------------------
- * 6. AT_CEILING vs. AT_LIMIT_3_CONSEC & Bound Counts (Follow-up §2)
+ * 6. AT_CEILING vs. AT_LIMIT_3_CONSEC & Upper-Track Start Clamp (Follow-up 1 & 3)
  * ------------------------------------------------------------------------- */
 const std1k = QLDM.buildMatchTable({ matchSet: "standard" }).filter(m => m.centerHz === 1000);
+assert.deepEqual(std1k.map(m => m.fixedLevelSpl), [60, 70, 80, 85, 90, 95]);
+
+/* Upper track starts at ceiling (100 dB) for both T-5 (90 dB) and T (95 dB, +5 dB above complex) */
+const m90 = std1k.find(m => m.fixedLevelSpl === 90);
+const m95 = std1k.find(m => m.fixedLevelSpl === 95);
+const uStart90 = QLDM.createTrackState(m90, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 });
+const uStart95 = QLDM.createTrackState(m95, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 });
+assert.equal(uStart90.curVariedSpl, 100.0, "Upper track for T-5 (90 dB) must start at ceiling (100 dB)");
+assert.equal(uStart95.curVariedSpl, 100.0, "Upper track for T (95 dB) must start clamped at ceiling (100 dB = +5 dB)");
+QLDM.stepTrack(uStart95, true, 100.0);
+assert.equal(uStart95.hitCeilingFlags[0], true, "Clamped start trial at ceiling must count as a trial at the ceiling");
+
 const capPairs = std1k.map(m => {
   const u = QLDM.createTrackState(m, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 });
   const l = QLDM.createTrackState(m, "lower", { trialsPerTrack: 8, ceilingSpl: 100.0 });
   for (let i = 0; i < 8; i++) {
-    if (m.fixedLevelSpl === 100) {
-      /* Listener always judges 100 dB complex louder than capped 100 dB tone -> hits ceiling */
+    if (m.fixedLevelSpl === 95) {
+      /* Listener always judges 95 dB complex louder than capped 100 dB tone -> hits ceiling */
       QLDM.stepTrack(u, false, 100.0);
       QLDM.stepTrack(l, false, 100.0);
     } else if (m.fixedLevelSpl === 60) {
@@ -303,17 +315,17 @@ const capPairs = std1k.map(m => {
   return { upper: u, lower: l };
 });
 const capEval = QLDM.evaluateBlockMatches(std1k, capPairs, { componentFlagThresholdDb: -6.0 });
-const row100 = capEval.rows.find(r => r.fixedLevelSpl === 100);
+const row95 = capEval.rows.find(r => r.fixedLevelSpl === 95);
 const row60 = capEval.rows.find(r => r.fixedLevelSpl === 60);
-assert.ok(row100.flags.includes("AT_CEILING"), "100 dB match should carry AT_CEILING");
-assert.ok(!row100.flags.includes("AT_LIMIT_3_CONSEC"), "100 dB match at ceiling should not carry AT_LIMIT_3_CONSEC");
-assert.ok(row100.nAtCeiling >= 10 && row100.nAtCeilingFixedLouder === row100.nAtCeiling);
+assert.ok(row95.flags.includes("AT_CEILING"), "95 dB match capped at 100 dB ceiling should carry AT_CEILING");
+assert.ok(!row95.flags.includes("AT_LIMIT_3_CONSEC"), "95 dB match at ceiling should not carry AT_LIMIT_3_CONSEC");
+assert.ok(row95.nAtCeiling >= 10 && row95.nAtCeilingFixedLouder === row95.nAtCeiling);
 assert.ok(row60.flags.includes("AT_LIMIT_3_CONSEC"), "60 dB match hitting 80 dB (+20 range) should carry AT_LIMIT_3_CONSEC");
 assert.ok(!row60.flags.includes("AT_CEILING"), "60 dB match at 80 dB should not carry AT_CEILING");
 assert.equal(row60.nAtCeiling, 0);
 console.log(
-  `[PASS Ceiling Bounds] 100 dB match: flags=[${row100.flags.join(",")}], n_at_ceiling=${row100.nAtCeiling}, ` +
-  `fixed_louder=${row100.nAtCeilingFixedLouder} | 60 dB (+20 range): flags=[${row60.flags.join(",")}]`
+  `[PASS Ceiling Bounds] 95 dB match (ceil 100): flags=[${row95.flags.join(",")}], n_at_ceiling=${row95.nAtCeiling}, ` +
+  `fixed_louder=${row95.nAtCeilingFixedLouder} | 60 dB (+20 range): flags=[${row60.flags.join(",")}]`
 );
 
 /* -------------------------------------------------------------------------
@@ -345,22 +357,23 @@ console.log(`[PASS Extended Component Flag] 1-oct (-7 dB) flagged & marked; 1/4-
 /* -------------------------------------------------------------------------
  * 8. Headless Exercise of "Too Loud" Flow, Reload Recovery, & CSV/JSON Exports
  * ------------------------------------------------------------------------- */
-function makeMockSession(seed) {
+function makeMockSession(seed, matchSetOverride = "short4", limitsOverride = null) {
   const rngLocal = QLDM.createRng(seed);
-  const matches1k = QLDM.buildMatchTable({ matchSet: "short4" }).filter(m => m.centerHz === 1000);
-  const matches4k = QLDM.buildMatchTable({ matchSet: "short4" }).filter(m => m.centerHz === 4000);
-  const mkBlk = (fc, ms) => ({
-    blockPass: 1,
-    centerHz: fc,
-    matches: ms.map(m => ({ ...m, blockPass: 1, excludedReason: "" })),
-    pairs: ms.map(m => ({
-      upper: QLDM.createTrackState(m, "upper", { trialsPerTrack: 8, ceilingSpl: 100.0 }),
-      lower: QLDM.createTrackState(m, "lower", { trialsPerTrack: 8, ceilingSpl: 100.0 })
-    })),
-    trialsInBlockCompleted: 0,
-    completed: false,
-    evalSummary: null
-  });
+  const settings = {
+    matchSet: matchSetOverride,
+    durationMs: 500,
+    rampMs: 20,
+    gapMs: 400,
+    itiMs: 300,
+    trialsPerTrack: 8,
+    initialMaxOutputSpl: 100,
+    compFlagDb: -6.0,
+    initialSeed: seed,
+    limits: limitsOverride || { cu5_1k: 25, ucl_1k: null, cu5_4k: 35, ucl_4k: null }
+  };
+  const b1 = QLDM.createSessionBlockState(1000, 1, settings);
+  const b2 = QLDM.createSessionBlockState(4000, 1, settings);
+  b1.started = true;
   return {
     rngLocal,
     sess: {
@@ -371,18 +384,7 @@ function makeMockSession(seed) {
       participantId: "SUBJ_TEST",
       ear: "Right",
       earCode: "R",
-      settings: {
-        matchSet: "short4",
-        durationMs: 500,
-        rampMs: 20,
-        gapMs: 400,
-        itiMs: 300,
-        trialsPerTrack: 8,
-        initialMaxOutputSpl: 100,
-        compFlagDb: -6.0,
-        initialSeed: seed,
-        limits: { cu5_1k: 25, ucl_1k: null, cu5_4k: 35, ucl_4k: null }
-      },
+      settings,
       analogGainConfirmation: {
         confirmed: true,
         confirmed_at_iso: "2026-11-20T15:00:00Z",
@@ -393,9 +395,9 @@ function makeMockSession(seed) {
       audioInfo: { requestedSampleRate: 48000, grantedSampleRate: 48000, outputDevices: ["Coupler Test DAC"] },
       calibration: { ...QLDM.TRANSDUCER_PRESETS.er3a_nominal },
       rngState: rngLocal.getState(),
-      ceilingSpl: 100.0,
+      ceilingSpl: b1.ceilingSpl,
       tooLoudEvents: [],
-      blocks: [mkBlk(1000, matches1k), mkBlk(4000, matches4k)],
+      blocks: [b1, b2],
       activeBlockArrayIndex: 0,
       phase: "block",
       tbtRows: []
@@ -409,6 +411,8 @@ const runReloaded = makeMockSession(999111);
 
 function stepMockSessionOnce(sess, rngInst) {
   const blk = sess.blocks[sess.activeBlockArrayIndex];
+  blk.started = true;
+  sess.ceilingSpl = blk.ceilingSpl;
   const active = [];
   blk.pairs.forEach(p => {
     if (p.upper && !p.upper.finished) active.push(p.upper);
@@ -424,7 +428,7 @@ function stepMockSessionOnce(sess, rngInst) {
   const vInt = rngInst.next() < 0.5 ? 1 : 2;
   const resp = rngInst.next() < 0.5;
   sess.rngState = rngInst.getState();
-  QLDM.stepTrack(tr, resp, sess.ceilingSpl);
+  QLDM.stepTrack(tr, resp, blk.ceilingSpl);
   blk.trialsInBlockCompleted += 1;
   sess.tbtRows.push({
     phase: "block", blockPass: 1, blockHz: blk.centerHz, matchId: tr.matchId, role: tr.role,
@@ -435,7 +439,7 @@ function stepMockSessionOnce(sess, rngInst) {
     interval1Sound: vInt === 1 ? "tone" : "5tc_1oct", interval1Spl: 60,
     interval2Sound: vInt === 2 ? "tone" : "5tc_1oct", interval2Spl: 60,
     responseInterval: resp ? vInt : (vInt === 1 ? 2 : 1), variedJudgedLouder: resp ? 1 : 0,
-    tooLoud: 0, rtMs: 420, ceilingSpl: sess.ceilingSpl, guardStatus: "OK"
+    tooLoud: 0, rtMs: 420, ceilingSpl: blk.ceilingSpl, guardStatus: "OK"
   });
   return true;
 }
@@ -451,21 +455,27 @@ while (stepMockSessionOnce(restoredSess, restoredRng)) { /* finish after reload 
 assert.equal(QLDM.formatPseCsv(restoredSess), QLDM.formatPseCsv(runContinuous.sess), "Reloaded session PSE CSV must match uninterrupted run identically");
 assert.equal(QLDM.formatTbtCsv(restoredSess), QLDM.formatTbtCsv(runContinuous.sess), "Reloaded session TBT CSV must match uninterrupted run identically");
 
-/* 8b. "Too loud" flow & file exports */
-const tlRun = makeMockSession(777333);
-/* Trigger two "Too loud" presses (100 -> 95 -> 90 -> 85 dB), dropping 90 dB unstarted matches in Block 2 */
+/* 8b. "Too loud" flow: started Block 1 ends tracks > new ceiling; unstarted Block 2 recomputes T & full 6 levels! */
+const tlRun = makeMockSession(777333, "standard", { cu5_1k: 20, ucl_1k: null, cu5_4k: 20, ucl_4k: null });
+assert.equal(tlRun.sess.blocks[1].started, false);
+/* Trigger three "Too loud" presses during Block 1 (100 -> 95 -> 90 -> 85 dB) */
 for (let k = 0; k < 3; k++) {
-  const tr90 = tlRun.sess.blocks[0].pairs[1].upper;
+  const tr95 = tlRun.sess.blocks[0].pairs[5].upper;
   QLDM.applyTooLoudToSession(tlRun.sess, {
-    isPractice: false, trackRef: tr90, blockPass: 1, blockHz: 1000, matchId: tr90.matchId,
-    role: "forward", trackId: tr90.trackId, trackSlot: "upper", centerHz: 1000, bandwidthOct: 1.0,
-    fixedSound: QLDM.SOUND_1OCT, variedSound: QLDM.SOUND_TONE, fixedLevelSpl: 90, variedLevelSpl: 100,
-    variedInterval: 1, sound1: QLDM.SOUND_TONE, level1Spl: 100, sound2: QLDM.SOUND_1OCT, level2Spl: 90
+    isPractice: false, trackRef: tr95, blockPass: 1, blockHz: 1000, matchId: tr95.matchId,
+    role: "forward", trackId: tr95.trackId, trackSlot: "upper", centerHz: 1000, bandwidthOct: 1.0,
+    fixedSound: QLDM.SOUND_1OCT, variedSound: QLDM.SOUND_TONE, fixedLevelSpl: 95, variedLevelSpl: 100,
+    variedInterval: 1, sound1: QLDM.SOUND_TONE, level1Spl: 100, sound2: QLDM.SOUND_1OCT, level2Spl: 95
   }, "2026-11-20T15:02:00Z");
 }
-assert.equal(tlRun.sess.ceilingSpl, 85.0, "Three Too Loud presses should lower ceiling from 100 to 85 dB SPL");
-assert.equal(tlRun.sess.blocks[0].pairs[1].upper.stopReason, "TOO_LOUD_CEILING");
-assert.ok(tlRun.sess.blocks[1].matches[1].excludedReason.startsWith("TOO_LOUD_CEILING"), "Unstarted 90 dB match in Block 2 must be excluded by 85 dB ceiling");
+assert.equal(tlRun.sess.blocks[0].ceilingSpl, 85.0, "Three Too Loud presses should lower Block 1 ceiling from 100 to 85 dB SPL");
+assert.equal(tlRun.sess.blocks[1].ceilingSpl, 85.0, "Three Too Loud presses should lower Block 2 ceiling from 100 to 85 dB SPL");
+assert.equal(tlRun.sess.blocks[0].pairs[5].upper.stopReason, "TOO_LOUD_CEILING", "Started Block 1 95 dB track must stop");
+assert.equal(tlRun.sess.blocks[0].pairs[4].upper.stopReason, "TOO_LOUD_CEILING", "Started Block 1 90 dB track must stop");
+/* Unstarted Block 2 must have recomputed T = 80 dB SPL and kept all 6 levels [45, 55, 65, 70, 75, 80] */
+assert.equal(tlRun.sess.blocks[1].topLevelSpl, 80.0);
+assert.deepEqual(tlRun.sess.blocks[1].matches.map(m => m.fixedLevelSpl), [45, 55, 65, 70, 75, 80]);
+assert.ok(tlRun.sess.blocks[1].matches.every(m => !m.excludedReason), "Recomputed unstarted Block 2 should run all 6 levels");
 
 while (stepMockSessionOnce(tlRun.sess, tlRun.rngLocal)) { /* finish remaining 60 dB tracks */ }
 const pseCsv = QLDM.formatPseCsv(tlRun.sess);
@@ -536,10 +546,9 @@ assert.equal(QLDM.TRANSDUCER_PRESETS.er3a_nominal.refDbfsRms60, -60.0);
 console.log(`[PASS Legacy v1.0.0 Compatibility] v1 records & sessions preserve -70.0 dBFS (+30 dB re qCLS, exact v1.0.0 digital RMS); new calibrations default to -60.0 dBFS.`);
 
 /* -------------------------------------------------------------------------
- * 10. v1.1.2 Booth Polish: Calibration JSON Export/Import, Per-Ear Offsets,
- *     Random Seed Generation, Flexible qCLS_ELC Parsing, & Results SVG Plot
+ * 10. v1.1.2 Booth Polish & v1.2.0 Listener-Specific Top Level T (Follow-up 3)
  * ------------------------------------------------------------------------- */
-assert.equal(QLDM.APP_VERSION, "1.1.2");
+assert.equal(QLDM.APP_VERSION, "1.2.0");
 
 /* 10a. Per-ear Left/Right receiver calibration + JSON export/import round-trip */
 const perEarCal = {
@@ -629,5 +638,112 @@ const svgMarkup = QLDM.renderResultsSvg(svgSession);
 assert.ok(svgMarkup.startsWith("<svg ") && svgMarkup.endsWith("</svg>"));
 assert.ok(svgMarkup.includes("1 kHz Block") && svgMarkup.includes("4 kHz Block"));
 console.log(`[PASS v1.1.2 Booth Polish] Per-ear calibration & JSON import/export, random seeds, qCLS_ELC (_HHMM) parsing, & 2-panel Results SVG verified.`);
+
+/* -------------------------------------------------------------------------
+ * 11. Follow-up 3 Verification: Per-Frequency T & Block Ceiling Derivation,
+ *     20 dB SPL Low-Tone Resolution @ T=75, & Request 6 Top-Level Simulation
+ * ------------------------------------------------------------------------- */
+/* 11a. Verify spec table of T -> 6 levels and independent 1k / 4k block ceilings */
+const expectedLevelSets = [
+  [105, 95, [60, 70, 80, 85, 90, 95]],
+  [100, 95, [60, 70, 80, 85, 90, 95]],
+  [99.2, 90, [55, 65, 75, 80, 85, 90]],
+  [95, 90, [55, 65, 75, 80, 85, 90]],
+  [90, 85, [50, 60, 70, 75, 80, 85]],
+  [85, 80, [45, 55, 65, 70, 75, 80]],
+  [83.4, 75, [40, 50, 60, 65, 70, 75]]
+];
+for (const [uclVal, expT, expLvls] of expectedLevelSets) {
+  const p = QLDM.deriveBlockLevelPlan({ centerHz: 4000, maxOutputSpl: 100, uclSpl: uclVal, cu5Spl: 20 });
+  assert.equal(p.ceilingSpl, Math.min(100, uclVal));
+  assert.equal(p.topLevelSpl, expT);
+  assert.deepEqual(p.candidateLevelsSpl, expLvls);
+  assert.ok(p.excludedLevels.every(e => !e.excludedReason.includes("ABOVE_LISTENER_TOO_LOUD")));
+}
+
+/* Empty Too Loud -> ceiling = Max Output, T = 95; short4 -> [T-35, T-5] = [60, 90] */
+const pEmpty = QLDM.deriveBlockLevelPlan({ centerHz: 1000, maxOutputSpl: 105, uclSpl: null, cu5Spl: 55 });
+assert.equal(pEmpty.ceilingSpl, 105);
+assert.equal(pEmpty.topLevelSpl, 95);
+assert.deepEqual(pEmpty.activeLevelsSpl, [70, 80, 85, 90, 95]);
+assert.equal(pEmpty.excludedLevels.length, 1);
+assert.ok(pEmpty.excludedLevels[0].excludedReason.startsWith("BELOW_CU5_PLUS_10DB"));
+
+const pShort = QLDM.deriveBlockLevelPlan({ centerHz: 1000, maxOutputSpl: 100, uclSpl: 85, matchSet: "short4" });
+assert.equal(pShort.topLevelSpl, 80);
+assert.deepEqual(pShort.candidateLevelsSpl, [45, 75]);
+
+/* Independent block ceilings in one session: 1 kHz empty (ceil 100, T=95) vs 4 kHz ucl=82 (ceil 82, T=75, lowest tone=20 dB) */
+const asymPlans = QLDM.deriveSessionLevelPlans({
+  initialMaxOutputSpl: 100,
+  matchSet: "standard",
+  limits: { cu5_1k: 20, ucl_1k: null, cu5_4k: 20, ucl_4k: 82.0 }
+});
+assert.equal(asymPlans.plansByHz[1000].ceilingSpl, 100.0);
+assert.equal(asymPlans.plansByHz[1000].topLevelSpl, 95.0);
+assert.equal(asymPlans.plansByHz[1000].lowestToneSpl, 40.0);
+assert.equal(asymPlans.plansByHz[4000].ceilingSpl, 82.0);
+assert.equal(asymPlans.plansByHz[4000].topLevelSpl, 75.0);
+assert.equal(asymPlans.plansByHz[4000].lowestToneSpl, 20.0);
+assert.equal(asymPlans.sessionLowestToneSpl, 20.0);
+
+/* Pre-playback guard uses each block's own ceiling: 85 dB tone refused in 4k block (ceil 82) but allowed in 1k block (ceil 100) */
+const guard4kBlock = QLDM.generateSoundWaveform({
+  centerHz: 4000, sound: QLDM.SOUND_TONE, levelSpl: 85.0,
+  calTable: QLDM.TRANSDUCER_PRESETS.flat_ref, ceilingSpl: asymPlans.plansByHz[4000].ceilingSpl
+});
+assert.equal(guard4kBlock.ok, false);
+assert.equal(guard4kBlock.reason, "CEILING_EXCEEDED_BY_BUFFER");
+
+/* 20 dB SPL lowest tone (T=75) synthesizes cleanly on 24-bit path (-100 dBFS RMS) */
+const lowTone20 = QLDM.generateSoundWaveform({
+  centerHz: 4000, sound: QLDM.SOUND_TONE, levelSpl: 20.0,
+  calTable: QLDM.TRANSDUCER_PRESETS.flat_ref, ceilingSpl: asymPlans.plansByHz[4000].ceilingSpl
+});
+assert.equal(lowTone20.ok, true);
+
+/* SVG plot x-axis ticks reflect levels in use per block (e.g. 75 at 4 kHz, 95 at 1 kHz; no hardcoded 100) */
+const asymSess = makeMockSession(445566, "standard", { cu5_1k: 20, ucl_1k: null, cu5_4k: 20, ucl_4k: 82.0 }).sess;
+const asymSvg = QLDM.renderResultsSvg(asymSess);
+assert.ok(asymSvg.includes(">85</text>") && asymSvg.includes(">95</text>"));
+assert.ok(asymSvg.includes(">40</text>") && asymSvg.includes(">75</text>"));
+assert.ok(!asymSvg.includes(">100</text>"), "Result SVG must not use hardcoded 100 dB tick when levels are [60..95] and [40..75]");
+
+const asymSesJson = JSON.parse(QLDM.formatSesJson(asymSess, "2026-11-21T14:00:00Z"));
+assert.equal(asymSesJson.level_limits.blocks_by_frequency.length, 2);
+assert.equal(asymSesJson.level_limits.blocks_by_frequency[0].final_top_level_t_spl, 95);
+assert.equal(asymSesJson.level_limits.blocks_by_frequency[1].final_top_level_t_spl, 75);
+assert.equal(asymSesJson.level_limits.blocks_by_frequency[1].final_ceiling_spl, 82);
+
+/* 11b. Request 6 Simulation: Complex at T (95 dB), Ceiling at T + 5 (100 dB), sigma = 4 dB, 16 trials/match */
+console.log("\n=== Top-Level Ceiling Simulation (Complex = T = 95 dB, Ceiling = 100 dB, sigma = 4.0 dB, 16 trials, N = 2000 blocks/point) ===");
+const topSimRows = QLDM.runTopLevelCeilingSimulation({
+  topLevelSpl: 95.0,
+  ceilingSpl: 100.0,
+  sigma: 4.0,
+  trialsPerTrack: 8,
+  nBlocks: 2000,
+  testDeltas: [-4, -2, 0, 2, 4, 6],
+  seed: 20261121
+});
+for (const r of topSimRows) {
+  const dStr = (r.trueDeltaDb >= 0 ? "+" : "") + r.trueDeltaDb.toFixed(0);
+  const bAll = (r.biasAllDb >= 0 ? "+" : "") + r.biasAllDb.toFixed(3);
+  const bUnf = Number.isFinite(r.biasUnflaggedDb) ? ((r.biasUnflaggedDb >= 0 ? "+" : "") + r.biasUnflaggedDb.toFixed(3)) : "  n/a ";
+  const sdUnf = Number.isFinite(r.sdUnflaggedDb) ? r.sdUnflaggedDb.toFixed(2) : " n/a";
+  console.log(
+    `  True Delta = ${dStr.padStart(3)} dB | All: bias=${bAll} dB, SD=${r.sdAllDb.toFixed(2)} dB | ` +
+    `Unflagged: bias=${bUnf} dB, SD=${sdUnf} dB | ` +
+    `AT_CEILING = ${r.atCeilingRatePct.toFixed(1).padStart(5)}% | ` +
+    `mean(n_ceil / fixed_louder) = ${r.meanNAtCeilingAll.toFixed(2)} / ${r.meanNFixedLouderAll.toFixed(2)} ` +
+    `(when flagged: ${r.meanNAtCeilingWhenFlagged.toFixed(2)} / ${r.meanNFixedLouderWhenFlagged.toFixed(2)})`
+  );
+}
+/* Verify AT_CEILING rate rises monotonically from negative to positive true Delta, and Delta <= 0 stays well-behaved */
+for (let i = 1; i < topSimRows.length; i++) {
+  assert.ok(topSimRows[i].atCeilingRatePct >= topSimRows[i - 1].atCeilingRatePct, "AT_CEILING rate must increase monotonically with true Delta");
+}
+assert.ok(Math.abs(topSimRows[0].biasAllDb) < 0.25 && topSimRows[0].atCeilingRatePct < 2.0, "At true Delta = -4 dB, bias and AT_CEILING rate should be negligible");
+console.log(`[PASS Follow-up 3 / v1.2.0] Verified per-listener T, per-block ceilings, unstarted T recomputation, dynamic low-tone check, and top-level T simulation.`);
 
 console.log("\nALL qLDM ACCEPTANCE TESTS PASSED.");

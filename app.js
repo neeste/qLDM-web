@@ -762,37 +762,30 @@
     };
   }
 
-  function evaluateExclusionReason(matchRow, settings, activeCeilingSpl) {
-    const fc = matchRow.centerHz;
-    const lvl = matchRow.fixedLevelSpl;
-    const cu5 = fc === 1000 ? settings.limits.cu5_1k : settings.limits.cu5_4k;
-    const ucl = fc === 1000 ? settings.limits.ucl_1k : settings.limits.ucl_4k;
-
-    if (cu5 !== null && Number.isFinite(cu5) && lvl < cu5 + 10.0 - 1e-9) {
-      return `BELOW_CU5_PLUS_10DB (CU5=${cu5.toFixed(1)})`;
-    }
-    if (ucl !== null && Number.isFinite(ucl) && lvl > ucl + 1e-9) {
-      return `ABOVE_LISTENER_TOO_LOUD (UCL=${ucl.toFixed(1)})`;
-    }
-    if (lvl > activeCeilingSpl + 1e-9) {
-      return `ABOVE_MAX_OUTPUT (${activeCeilingSpl.toFixed(1)})`;
-    }
-    return "";
-  }
-
   function renderIdlePreview() {
     const cfg = readSetupSettings();
     const fs = audioCtx ? audioCtx.sampleRate : QLDM.DEFAULT_FS;
     const fsInfo = QLDM.computeFullScale1kSpl(calState, null, cfg.ear);
+    const planSummary = QLDM.deriveSessionLevelPlans(cfg);
+    const lowToneSpl = planSummary.sessionLowestToneSpl;
+    const highCompSpl = planSummary.sessionHighestComplexSpl;
+    const maxCeilSpl = planSummary.sessionMaxCeilingSpl;
     const gainSign = fsInfo.gainAboveQclsDb >= 0 ? "+" : "";
+
+    if (dom.calLvl30Btn) {
+      dom.calLvl30Btn.textContent = `${lowToneSpl.toFixed(0)} dB Check`;
+      dom.calLvl30Btn.title = `Check 24-bit resolution at the lowest tone level of this session (${lowToneSpl.toFixed(0)} dB SPL)`;
+    }
 
     if (dom.idleRefSummary) {
       dom.idleRefSummary.innerHTML =
         `Digital reference: <strong>${fsInfo.refDbfsRms60.toFixed(1)} dBFS RMS = 60.0 dB SPL</strong> ` +
         `(<strong>${gainSign}${fsInfo.gainAboveQclsDb.toFixed(1)} dB</strong> analog gain re qCLS; ` +
         `nominal full-scale 1 kHz tone = <strong>${fsInfo.fullScale1kSpl.toFixed(1)} dB SPL</strong>; ` +
+        `session span: <strong>${lowToneSpl.toFixed(0)} dB SPL</strong> lowest tone to <strong>${highCompSpl.toFixed(0)} dB SPL</strong> top complex, ` +
+        `tone ceiling up to <strong>${maxCeilSpl.toFixed(1)} dB SPL</strong>; ` +
         `<strong>24-bit / 48 kHz</strong> OS output path required with OS enhancements disabled). ` +
-        `Any buffer exceeding <code>0 dBFS</code>, missing calibration, or exceeding ceiling is refused before playback.`;
+        `Any buffer exceeding <code>0 dBFS</code>, missing calibration, or exceeding block ceiling is refused before playback.`;
     }
 
     const headroom = QLDM.computeMaxUnclippedLevels(calState, {
@@ -810,7 +803,7 @@
       <th>Crest Factor</th>
       <th>Peak @ 60 dB SPL</th>
       <th>Highest Unclipped SPL</th>
-      <th>Status vs. Max Output (${cfg.initialMaxOutputSpl} dB)</th>
+      <th>Status vs. Session Max (T / Block Ceiling)</th>
     </tr></thead><tbody>`;
 
     for (const h of visibleHeadroom) {
@@ -824,13 +817,20 @@
         </tr>`;
         continue;
       }
+      const planHz = planSummary.plansByHz[h.centerHz] || planSummary.plansByHz[1000];
+      const reqMaxSpl = (h.kind === "complex" && !cfg.includeReverseMatches)
+        ? planHz.highestComplexSpl
+        : planHz.ceilingSpl;
+      const reqLbl = (h.kind === "complex" && !cfg.includeReverseMatches)
+        ? `T=${reqMaxSpl.toFixed(0)} dB`
+        : `Ceil=${reqMaxSpl.toFixed(1)} dB`;
       const crestDb = 20 * Math.log10(h.crestFactor);
       const pkDb = 20 * Math.log10(Math.max(h.peakAt60dB, 1e-12));
-      const margin = h.maxUnclippedSpl - cfg.initialMaxOutputSpl;
-      const ok = margin >= 0;
+      const margin = h.maxUnclippedSpl - reqMaxSpl;
+      const ok = margin >= -1e-9;
       const badge = ok
-        ? `<span class="tag tag-ok">OK (+${margin.toFixed(1)} dB margin)</span>`
-        : `<span class="tag tag-flag">Clips above ${h.maxUnclippedSpl.toFixed(1)} dB SPL</span>`;
+        ? `<span class="tag tag-ok">OK (+${margin.toFixed(1)} dB re ${escapeHtml(reqLbl)})</span>`
+        : `<span class="tag tag-flag">Clips above ${h.maxUnclippedSpl.toFixed(1)} dB (need ${escapeHtml(reqLbl)})</span>`;
       html += `<tr>
         <td><strong>${escapeHtml(h.label)}</strong></td>
         <td>${h.crestFactor.toFixed(2)} (${crestDb.toFixed(1)} dB)</td>
@@ -842,39 +842,50 @@
     html += `</tbody></table>`;
     dom.headroomPreviewWrap.innerHTML = html;
 
-    const rawMatches = QLDM.buildMatchTable({
-      matchSet: cfg.matchSet,
-      includeNullMatches: cfg.includeNullMatches,
-      includeReverseMatches: cfg.includeReverseMatches
-    });
-    const annotated = rawMatches.map((m) => ({
-      ...m,
-      excludedReason: evaluateExclusionReason(m, cfg, cfg.initialMaxOutputSpl)
-    }));
-    const activeCount = annotated.filter((m) => !m.excludedReason).length;
-    const excludedCount = annotated.length - activeCount;
+    const previewBlocks = QLDM.CENTER_FREQS_HZ.map((fc) => QLDM.createSessionBlockState(fc, 1, cfg));
+    let activeCount = 0;
+    let excludedCount = 0;
+    for (const b of previewBlocks) {
+      for (const m of b.matches) {
+        if (m.excludedReason) excludedCount += 1;
+        else activeCount += 1;
+      }
+    }
     const totalScoredTrials = activeCount * 2 * cfg.trialsPerTrack;
     const pracTrials = cfg.includePractice ? 8 : 0;
     const secPerTrial = (2 * cfg.durationMs + cfg.gapMs + cfg.itiMs) / 1000.0 + 1.25;
     const estMinutes = Math.max(1, Math.round(((totalScoredTrials + pracTrials) * secPerTrial) / 60.0));
 
-    dom.matchCountLbl.textContent = `${activeCount} active` + (excludedCount ? ` (${excludedCount} excluded by limits)` : "");
+    dom.matchCountLbl.textContent = `${activeCount} active` + (excludedCount ? ` (${excludedCount} excluded by CU 5)` : "");
 
-    const byBlock = [1000, 4000].map((fc) => {
-      const bm = annotated.filter((m) => m.centerHz === fc);
-      const act = bm.filter((m) => !m.excludedReason);
-      const excl = bm.filter((m) => m.excludedReason);
+    const byBlock = previewBlocks.map((blk, bIdx) => {
+      const fc = blk.centerHz;
+      const act = blk.matches.filter((m) => !m.excludedReason);
+      const excl = blk.matches.filter((m) => Boolean(m.excludedReason));
       const lvls = act.map((m) => `${m.fixedLevelSpl}${m.role === "null" ? "N" : m.role === "reverse" ? "R" : ""}`).join(", ");
+      const sixStr = blk.sixLevelsSpl.join(", ");
+      const ceilSrc = blk.uclSpl !== null && blk.uclSpl <= cfg.initialMaxOutputSpl
+        ? `Too Loud=${blk.uclSpl.toFixed(1)}`
+        : `Max Output=${cfg.initialMaxOutputSpl.toFixed(0)}`;
       const exclTxt = excl.length > 0
-        ? ` • Excluded: ${excl.map((e) => `${e.fixedLevelSpl} dB (${e.excludedReason.split(" ")[0]})`).join(", ")}`
+        ? ` • Excluded: ${excl.map((e) => `${e.fixedLevelSpl} dB (${e.excludedReason})`).join(", ")}`
         : "";
-      return `<div><strong>Block ${fc === 1000 ? 1 : 2} (${fc} Hz):</strong> ${act.length} matches (${act.length * 2} interleaved tracks, ${act.length * 2 * cfg.trialsPerTrack} trials) — Fixed levels: [${lvls || "none"}] dB SPL${escapeHtml(exclTxt)}</div>`;
+      return (
+        `<div style="margin-bottom:6px;">` +
+        `<strong>Block ${bIdx + 1} (${fc} Hz):</strong> ` +
+        `Ceiling = <code>${blk.ceilingSpl.toFixed(1)} dB SPL</code> (${escapeHtml(ceilSrc)}) &bull; ` +
+        `Top Level <strong>T = <code>${blk.topLevelSpl.toFixed(0)} dB SPL</code></strong> &bull; ` +
+        `6 levels from T: <code>[${escapeHtml(sixStr)}]</code> dB SPL<br>` +
+        `<span style="margin-left:12px;">Active: <strong>${act.length} matches</strong> (${act.length * 2} tracks, ${act.length * 2 * cfg.trialsPerTrack} trials) at [${escapeHtml(lvls || "none")}] dB SPL &bull; Lowest tone: <code>${blk.lowestToneSpl.toFixed(0)} dB SPL</code>${escapeHtml(exclTxt)}</span>` +
+        `</div>`
+      );
     });
 
     dom.matchPlanPreview.innerHTML =
       byBlock.join("") +
       `<div style="margin-top:6px; color:#0f172a;"><strong>Total trials:</strong> ${totalScoredTrials} scored` +
       (pracTrials ? ` + ${pracTrials} practice` : "") +
+      ` &bull; <strong>Lowest session tone:</strong> ${lowToneSpl.toFixed(0)} dB SPL` +
       ` &bull; <strong>Estimated time:</strong> ~${estMinutes} min</div>`;
   }
 
@@ -935,38 +946,17 @@
   /* -------------------------------------------------------------------------
    * Session Construction, Persistence, & Completed History
    * ------------------------------------------------------------------------- */
-  function createBlockState(centerHz, blockPass, matchRows, settings, ceilingSpl) {
-    const matches = matchRows.map((m) => {
-      const excludedReason = evaluateExclusionReason(m, settings, ceilingSpl);
-      return { ...m, blockPass, excludedReason };
-    });
-    const pairs = matches.map((m) => {
-      if (m.excludedReason) {
-        return { upper: null, lower: null };
-      }
-      return {
-        upper: QLDM.createTrackState(m, "upper", {
-          startOffsetDb: 10.0,
-          trialsPerTrack: settings.trialsPerTrack,
-          ceilingSpl
-        }),
-        lower: QLDM.createTrackState(m, "lower", {
-          startOffsetDb: 10.0,
-          trialsPerTrack: settings.trialsPerTrack,
-          ceilingSpl
-        })
-      };
-    });
-
-    return {
-      blockPass,
-      centerHz,
-      matches,
-      pairs,
-      trialsInBlockCompleted: 0,
-      completed: false,
-      evalSummary: null
-    };
+  function getActivePhaseCeilingSpl() {
+    if (!session) return 100.0;
+    if (
+      session.phase === "practice" ||
+      session.phase === "practice_gate" ||
+      session.phase === "practice_check"
+    ) {
+      return Number(session.blocks?.[0]?.ceilingSpl ?? session.ceilingSpl ?? 100.0);
+    }
+    const blk = session.blocks?.[session.activeBlockArrayIndex];
+    return Number(blk?.ceilingSpl ?? session.ceilingSpl ?? 100.0);
   }
 
   async function buildNewSessionFromSetup(gainConfirmationRecord) {
@@ -976,22 +966,10 @@
     const fs = audioCtx.sampleRate;
 
     rng = QLDM.createRng(cfg.initialSeed);
-    const ceilingSpl = Math.min(cfg.initialMaxOutputSpl, QLDM.EQUIPMENT_MAX_SPL);
-    const allMatches = QLDM.buildMatchTable({
-      matchSet: cfg.matchSet,
-      includeNullMatches: cfg.includeNullMatches,
-      includeReverseMatches: cfg.includeReverseMatches
-    });
-
     const blocks = QLDM.CENTER_FREQS_HZ.map((fc) =>
-      createBlockState(
-        fc,
-        1,
-        allMatches.filter((m) => m.centerHz === fc),
-        cfg,
-        ceilingSpl
-      )
+      QLDM.createSessionBlockState(fc, 1, cfg)
     );
+    const ceilingSpl = blocks[0]?.ceilingSpl ?? Math.min(cfg.initialMaxOutputSpl, QLDM.EQUIPMENT_MAX_SPL);
 
     const resolvedEarCal = QLDM.resolveCalForEar(calState, cfg.ear);
     const headroom = QLDM.computeMaxUnclippedLevels(resolvedEarCal, {
@@ -1231,12 +1209,16 @@
     }
 
     const blk = session.blocks[session.activeBlockArrayIndex];
+    session.ceilingSpl = blk.ceilingSpl;
     const remTrials = countRemainingTrialsInBlock(blk);
     const passLabel = blk.blockPass > 1 ? ` (Repeat Pass #${blk.blockPass})` : "";
+    const topStr = Number.isFinite(blk.topLevelSpl) ? `, T = ${blk.topLevelSpl.toFixed(0)} dB SPL` : "";
     showInstructionModal(
       `Block ${session.activeBlockArrayIndex + 1}: ${blk.centerHz} Hz${passLabel} — Repeat Instruction`,
-      `${remTrials} trials in this block (${session.ear} ear). Remind the listener to judge the overall loudness of the whole sound and not a single component pitch.`,
+      `${remTrials} trials in this block (${session.ear} ear; Block Ceiling = ${blk.ceilingSpl.toFixed(1)} dB SPL${topStr}). Remind the listener to judge the overall loudness of the whole sound and not a single component pitch.`,
       () => {
+        blk.started = true;
+        session.ceilingSpl = blk.ceilingSpl;
         session.phase = "block";
         persistActiveSession();
         presentNextTrial();
@@ -1268,9 +1250,11 @@
 
   function updateTrialBadges() {
     if (!session) return;
-    dom.ceilingBadge.textContent = `Ceiling: ${session.ceilingSpl.toFixed(0)} dB SPL (${session.ear})`;
+    const activeCeil = getActivePhaseCeilingSpl();
+    session.ceilingSpl = activeCeil;
     if (session.phase === "practice" || session.phase === "practice_gate" || session.phase === "practice_check") {
       const p = session.practice;
+      dom.ceilingBadge.textContent = `Block Ceiling: ${activeCeil.toFixed(1)} dB SPL (1000 Hz, ${session.ear})`;
       dom.phaseBadge.textContent = `Practice${p.passCount > 1 ? ` (Pass ${p.passCount})` : ""}`;
       dom.progressBadge.textContent = `Trial ${Math.min(p.trialIndex + 1, p.totalTrials)} / ${p.totalTrials}`;
       dom.pracCheckBadge.textContent = p.obviousTotal > 0 ? `Check: ${p.obviousCorrect}/${p.obviousTotal}` : "";
@@ -1279,6 +1263,8 @@
       const total = countTotalTrialsInBlock(blk);
       const done = blk.trialsInBlockCompleted;
       const passTag = blk.blockPass > 1 ? ` (Pass ${blk.blockPass})` : "";
+      const tTag = Number.isFinite(blk.topLevelSpl) ? `, T=${blk.topLevelSpl.toFixed(0)} dB` : "";
+      dom.ceilingBadge.textContent = `Block Ceiling: ${activeCeil.toFixed(1)} dB SPL (${blk.centerHz} Hz${tTag}, ${session.ear})`;
       dom.phaseBadge.textContent = `Block ${session.activeBlockArrayIndex + 1}/${session.blocks.length} • ${blk.centerHz} Hz${passTag}`;
       dom.progressBadge.textContent = `Trial ${Math.min(done + 1, Math.max(total, 1))} / ${total}`;
       dom.pracCheckBadge.textContent = "";
@@ -1287,12 +1273,13 @@
 
   function buildPracticeTrialSpec() {
     const p = session.practice;
-    const fixedSpl = Math.max(45, Math.min(65, session.ceilingSpl - 15));
+    const pracCeil = getActivePhaseCeilingSpl();
+    const fixedSpl = Math.max(45, Math.min(65, pracCeil - 15));
     const offsets = [+12, -12, +10, -8, +6, -6, +4, -4];
     const rawOffset = offsets[p.trialIndex % offsets.length];
     const variedSpl = Math.max(
       QLDM.MIN_VARIED_SPL,
-      Math.min(session.ceilingSpl, fixedSpl + rawOffset)
+      Math.min(pracCeil, fixedSpl + rawOffset)
     );
     const isObviousCheck = p.trialIndex < 3 && Math.abs(variedSpl - fixedSpl) >= 8.0;
     const variedInterval = rng.next() < 0.5 ? 1 : 2;
@@ -1396,6 +1383,7 @@
     }
 
     updateTrialBadges();
+    const activeCeil = getActivePhaseCeilingSpl();
 
     const sound1 = spec.variedInterval === 1 ? spec.variedSound : spec.fixedSound;
     const level1Spl = spec.variedInterval === 1 ? spec.variedLevelSpl : spec.fixedLevelSpl;
@@ -1414,7 +1402,7 @@
       gapMs: session.settings.gapMs,
       calTable: session.calibration,
       ear: session.ear,
-      ceilingSpl: session.ceilingSpl
+      ceilingSpl: activeCeil
     });
 
     if (!tb.ok) {
@@ -1449,7 +1437,7 @@
         variedJudgedLouder: "",
         tooLoud: 0,
         rtMs: "",
-        ceilingSpl: session.ceilingSpl,
+        ceilingSpl: activeCeil,
         guardStatus: tb.reason
       });
       persistActiveSession();
@@ -1511,6 +1499,7 @@
 
     let trialInBlockNum = 0;
     let trialInTrackNum = 0;
+    const activeCeil = getActivePhaseCeilingSpl();
 
     if (p.isPractice) {
       session.practice.trialIndex += 1;
@@ -1525,7 +1514,8 @@
       }
     } else {
       const blk = session.blocks[session.activeBlockArrayIndex];
-      QLDM.stepTrack(p.trackRef, variedJudgedLouder, session.ceilingSpl);
+      blk.started = true;
+      QLDM.stepTrack(p.trackRef, variedJudgedLouder, blk.ceilingSpl);
       blk.trialsInBlockCompleted += 1;
       trialInBlockNum = blk.trialsInBlockCompleted;
       trialInTrackNum = p.trackRef.trialsCompleted;
@@ -1556,7 +1546,7 @@
       variedJudgedLouder: variedJudgedLouder ? 1 : 0,
       tooLoud: 0,
       rtMs,
-      ceilingSpl: session.ceilingSpl,
+      ceilingSpl: activeCeil,
       guardStatus: "OK"
     });
 
@@ -1576,12 +1566,18 @@
     dom.choice1Btn.disabled = true;
     dom.choice2Btn.disabled = true;
 
-    const { oldCeiling, newCeiling } = QLDM.applyTooLoudToSession(session, currentPresentation);
+    const { oldCeiling, newCeiling, blockChanges } = QLDM.applyTooLoudToSession(session, currentPresentation);
     currentPresentation = null;
     updateTrialBadges();
     persistActiveSession();
+    const recompInfo = (blockChanges || [])
+      .filter((c) => !c.started && Number.isFinite(c.recomputedTopLevelSpl))
+      .map((c) => `${c.centerHz} Hz T→${c.recomputedTopLevelSpl.toFixed(0)} dB`)
+      .join(", ");
     dom.trialSubStatus.textContent =
-      `Ceiling lowered by 5 dB (${oldCeiling.toFixed(0)} → ${newCeiling.toFixed(0)} dB SPL). Continuing safely...`;
+      `Block ceilings lowered by 5 dB (${oldCeiling.toFixed(1)} → ${newCeiling.toFixed(1)} dB SPL` +
+      (recompInfo ? `; unstarted ${recompInfo}` : "") +
+      `). Continuing safely...`;
 
     itiTimerId = setTimeout(() => {
       presentNextTrial();
@@ -1640,13 +1636,10 @@
     if (!session) return;
     const existingForHz = session.blocks.filter((b) => b.centerHz === centerHz);
     const nextPass = existingForHz.length + 1;
-    const allMatches = QLDM.buildMatchTable({
-      matchSet: session.settings.matchSet,
-      includeNullMatches: session.settings.includeNullMatches,
-      includeReverseMatches: session.settings.includeReverseMatches
-    }).filter((m) => m.centerHz === centerHz);
+    const latestPrev = existingForHz.length > 0 ? existingForHz[existingForHz.length - 1] : null;
+    const curCeil = latestPrev ? latestPrev.ceilingSpl : session.ceilingSpl;
 
-    const newBlk = createBlockState(centerHz, nextPass, allMatches, session.settings, session.ceilingSpl);
+    const newBlk = QLDM.createSessionBlockState(centerHz, nextPass, session.settings, curCeil);
     session.blocks.push(newBlk);
     session.activeBlockArrayIndex = session.blocks.length - 1;
     session.phase = "block_gate";
@@ -1662,12 +1655,20 @@
     const fsInfo = QLDM.computeFullScale1kSpl(session.calibration);
 
     const nScoredTrials = session.tbtRows.filter((t) => t.phase === "block" && t.tooLoud === 0 && t.guardStatus === "OK").length;
+    const blkMeta = QLDM.CENTER_FREQS_HZ.map((fc) => {
+      const blks = (session.blocks || []).filter((b) => b.centerHz === fc);
+      const b = blks.length > 0 ? blks[blks.length - 1] : null;
+      if (!b) return `${fc / 1000}k: --`;
+      const tTxt = Number.isFinite(b.topLevelSpl) ? `T=${b.topLevelSpl.toFixed(0)}` : "T=--";
+      const cTxt = Number.isFinite(b.ceilingSpl) ? `Ceil=${b.ceilingSpl.toFixed(1)}` : `Ceil=${session.ceilingSpl.toFixed(1)}`;
+      return `${fc / 1000}k [${tTxt}, ${cTxt} dB]`;
+    }).join(" &bull; ");
     dom.resultsSummaryMeta.innerHTML =
       `<strong>Participant:</strong> ${escapeHtml(session.participantId)} &bull; ` +
       `<strong>Ear:</strong> ${escapeHtml(session.ear)} &bull; ` +
       `<strong>Date:</strong> ${escapeHtml(session.dateYmd)} &bull; ` +
       `<strong>Scored Trials:</strong> ${nScoredTrials} &bull; ` +
-      `<strong>Final Ceiling:</strong> ${session.ceilingSpl.toFixed(1)} dB SPL &bull; ` +
+      `<strong>Blocks:</strong> ${blkMeta} &bull; ` +
       `<strong>Ref:</strong> ${fsInfo.refDbfsRms60.toFixed(1)} dBFS = 60 dB SPL &bull; ` +
       `<strong>Sample Rate:</strong> ${session.audioInfo?.grantedSampleRate || QLDM.DEFAULT_FS} Hz`;
 
@@ -2111,7 +2112,8 @@
     });
 
     dom.calLvl30Btn.addEventListener("click", () => {
-      dom.calToneSpl.value = "30";
+      const lowSpl = QLDM.deriveSessionLevelPlans(readSetupSettings()).sessionLowestToneSpl;
+      dom.calToneSpl.value = String(Math.round(lowSpl));
       if (isCalPlaying) startCalibrationTone();
     });
     dom.calLvl80Btn.addEventListener("click", () => {

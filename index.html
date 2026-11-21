@@ -45,7 +45,7 @@
         <select id="match-set">
           <option value="standard" selected>Standard Set — 12 Matches (1-oct @ 1 &amp; 4 kHz, ~10 min)</option>
           <option value="extended">Extended Set — 24 Matches (1 &amp; 1/4-oct @ 1 &amp; 4 kHz, ~19 min)</option>
-          <option value="short4">Short Anchor Set — 4 Matches (60 &amp; 90 dB @ 1 &amp; 4 kHz, ~3 min)</option>
+          <option value="short4">Short Anchor Set — 4 Matches (T&minus;35 &amp; T&minus;5 dB @ 1 &amp; 4 kHz, ~3 min)</option>
         </select>
       </div>
 
@@ -55,7 +55,7 @@
       </label>
       <label class="check-row">
         <input type="checkbox" id="include-null">
-        <span>Pilot Option: Add <strong>4 Null Matches</strong> (Tone vs. Tone @ 60 &amp; 90 dB)</span>
+        <span>Pilot Option: Add <strong>4 Null Matches</strong> (Tone vs. Tone @ T&minus;35 &amp; T&minus;5 dB)</span>
       </label>
       <label class="check-row">
         <input type="checkbox" id="include-reverse">
@@ -95,7 +95,7 @@
 
       <h3>Optional Listener Limits (dB SPL)</h3>
       <div class="muted-note" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
-        <span>Excludes levels &lt; <code>CU 5 + 10 dB</code> or &gt; listener <code>Too Loud</code> (CU 50).</span>
+        <span>Sets block ceiling = <code>min(Max Output, Too Loud)</code> &amp; top level <code>T &le; 95 dB</code>; excludes <code>&lt; CU 5 + 10 dB</code>.</span>
         <button type="button" id="import-qcls-btn" class="btn btn-outline" style="padding:4px 9px; font-size:12px;">Import qCLS_ELC CSV</button>
         <input type="file" id="qcls-elc-file" accept=".csv,text/csv" hidden>
       </div>
@@ -373,10 +373,10 @@
           </div>
           <div class="field" style="margin:0; width:145px;">
             <label for="cal-tone-spl">Nominal Level (dB SPL)</label>
-            <input type="number" id="cal-tone-spl" value="80" min="30" max="100" step="1">
+            <input type="number" id="cal-tone-spl" value="80" min="10" max="100" step="1">
           </div>
           <div style="display:flex; gap:5px;">
-            <button type="button" id="cal-lvl-30-btn" class="btn btn-outline" style="padding:7px 9px; font-size:12px;" title="Check 24-bit resolution at lowest tone level (30 dB SPL)">30 dB Check</button>
+            <button type="button" id="cal-lvl-30-btn" class="btn btn-outline" style="padding:7px 9px; font-size:12px;" title="Check 24-bit resolution at the lowest tone level of the active session">40 dB Check</button>
             <button type="button" id="cal-lvl-80-btn" class="btn btn-outline" style="padding:7px 9px; font-size:12px;" title="Set nominal coupler calibration level (80 dB SPL)">80 dB Ref</button>
           </div>
           <div class="field" style="margin:0; width:120px;">
