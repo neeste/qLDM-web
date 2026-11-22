@@ -83,6 +83,8 @@
     dlPseBtn: $("dl-pse-btn"),
     dlTbtBtn: $("dl-tbt-btn"),
     dlSesBtn: $("dl-ses-btn"),
+    gainRestoreBanner: $("gain-restore-banner"),
+    gainRestoreText: $("gain-restore-text"),
     compFlagBanner: $("comp-flag-banner"),
     compFlagText: $("comp-flag-text"),
     compRepeatBtns: $("comp-repeat-btns"),
@@ -108,6 +110,7 @@
     proceedBlock1Btn: $("proceed-block1-btn"),
 
     pauseModal: $("pause-modal"),
+    pauseGainRestoreNote: $("pause-gain-restore-note"),
     pauseReturnBtn: $("pause-return-btn"),
     pauseRestartBtn: $("pause-restart-btn"),
     pauseResumeBtn: $("pause-resume-btn"),
@@ -1587,11 +1590,30 @@
   /* -------------------------------------------------------------------------
    * Pause, Completion, Component-Listening Repeat, & Results Table
    * ------------------------------------------------------------------------- */
+  function formatGainRestoreHtml(calObj, ear) {
+    const fsInfo = QLDM.computeFullScale1kSpl(calObj || calState, null, ear || null);
+    const stepDb = fsInfo.gainAboveQclsDb;
+    if (Math.abs(stepDb) < 0.05) {
+      return `<strong>Hardware Gain Check:</strong> Digital reference matches qCLS (<code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS = 60 dB SPL</code>; 0.0 dB offset).`;
+    }
+    const dirWord = stepDb > 0 ? "lower" : "raise";
+    const signStr = stepDb > 0 ? `&minus;${Math.abs(stepDb).toFixed(1)}` : `+${Math.abs(stepDb).toFixed(1)}`;
+    const gainSign = stepDb > 0 ? `+${stepDb.toFixed(1)}` : stepDb.toFixed(1);
+    return (
+      `<strong>Hardware Gain Restore Reminder:</strong> This qLDM session ran at <code>${fsInfo.refDbfsRms60.toFixed(1)} dBFS = 60 dB SPL</code> ` +
+      `(<strong>${gainSign} dB</strong> analog gain re qCLS). Before switching back to <strong>qCLS</strong> or <strong>qVCV</strong> on this workstation, ` +
+      `<strong>${dirWord} your hardware attenuator / output gain by ${Math.abs(stepDb).toFixed(1)} dB (${signStr} dB)</strong> to restore the qCLS 60 dB SPL setting.`
+    );
+  }
+
   function openPauseModal() {
     stopAllAudio();
     awaitingResponse = false;
     dom.choice1Btn.disabled = true;
     dom.choice2Btn.disabled = true;
+    if (dom.pauseGainRestoreNote) {
+      dom.pauseGainRestoreNote.innerHTML = formatGainRestoreHtml(session?.calibration, session?.ear);
+    }
     dom.pauseModal.classList.add("open");
   }
 
@@ -1652,7 +1674,12 @@
     if (!session) return;
     dom.resultsCard.style.display = "block";
     const rows = QLDM.collectSessionPseRows(session);
-    const fsInfo = QLDM.computeFullScale1kSpl(session.calibration);
+    const fsInfo = QLDM.computeFullScale1kSpl(session.calibration, null, session.ear);
+
+    if (dom.gainRestoreBanner && dom.gainRestoreText) {
+      dom.gainRestoreBanner.style.display = "flex";
+      dom.gainRestoreText.innerHTML = formatGainRestoreHtml(session.calibration, session.ear);
+    }
 
     const nScoredTrials = session.tbtRows.filter((t) => t.phase === "block" && t.tooLoud === 0 && t.guardStatus === "OK").length;
     const blkMeta = QLDM.CENTER_FREQS_HZ.map((fc) => {

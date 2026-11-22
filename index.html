@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>qLDM — Two-Interval Loudness Matching</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=1.2.0">
 </head>
 <body>
   <header class="topbar">
@@ -17,7 +17,7 @@
     </div>
     <div class="topbar-actions">
       <button type="button" id="open-cal-btn" class="btn btn-gold">Coupler Calibration &amp; Headroom</button>
-      <a href="guide.html" target="_blank" rel="noopener" class="btn btn-ghost-light">Clinician &amp; Tester Guide</a>
+      <a href="guide.html?v=1.2.0" target="_blank" rel="noopener" class="btn btn-ghost-light">Clinician &amp; Tester Guide</a>
     </div>
   </header>
 
@@ -216,6 +216,11 @@
           </div>
         </div>
 
+        <!-- Post-session hardware gain restore reminder -->
+        <div id="gain-restore-banner" class="banner banner-warn" style="margin-bottom:10px;">
+          <div id="gain-restore-text"></div>
+        </div>
+
         <!-- Component-listening alert banner -->
         <div id="comp-flag-banner" class="banner banner-alert" style="display:none;">
           <div id="comp-flag-text"></div>
@@ -310,6 +315,7 @@
       <p class="muted-note">
         Progress is saved automatically after every trial. You can resume where you left off, restart from Trial 1 keeping all current settings, or return to Setup.
       </p>
+      <div id="pause-gain-restore-note" class="banner banner-warn" style="margin:8px 0 10px; font-size:12.5px;"></div>
       <div class="modal-actions">
         <button type="button" id="pause-return-btn" class="btn btn-outline">Return to Setup</button>
         <button type="button" id="pause-restart-btn" class="btn btn-gold">Restart Session (Keep Settings)</button>
@@ -418,7 +424,7 @@
     </div>
   </div>
 
-  <script src="qldm_core.js"></script>
-  <script src="app.js"></script>
+  <script src="qldm_core.js?v=1.2.0"></script>
+  <script src="app.js?v=1.2.0"></script>
 </body>
 </html>
